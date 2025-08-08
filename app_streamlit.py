@@ -4,10 +4,10 @@ import pandas as pd
 import os
 import plotly.express as px
 from io import BytesIO
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+
+
+
+
 from openpyxl import Workbook
 
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -35,6 +35,7 @@ def load_data():
         return pd.DataFrame()
 
 def export_pdf(resumen):
+    return None
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
@@ -108,6 +109,27 @@ def main_app():
     with tab1:
         st.subheader("📈 Avance general del proyecto")
         if not df.empty:
+
+        st.markdown("### 🔍 Filtros")
+        with st.expander("Filtrar datos", expanded=False):
+            colf1, colf2, colf3 = st.columns(3)
+            estados = df["Estado"].dropna().unique().tolist()
+            eps_lista = df["EPS"].dropna().unique().tolist()
+            fechas = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dropna()
+
+            estado_sel = colf1.multiselect("Estado", sorted(estados), default=sorted(estados))
+            eps_sel = colf2.multiselect("EPS", sorted(eps_lista), default=sorted(eps_lista))
+            fecha_min = fechas.min() if not fechas.empty else None
+            fecha_max = fechas.max() if not fechas.empty else None
+            fecha_rango = colf3.date_input("Rango de fechas", (fecha_min, fecha_max))
+
+            if fecha_rango and len(fecha_rango) == 2:
+                desde, hasta = pd.to_datetime(fecha_rango[0]), pd.to_datetime(fecha_rango[1])
+                df = df[(df["Estado"].isin(estado_sel)) &
+                        (df["EPS"].isin(eps_sel)) &
+                        (df["FechaRadicacion"] >= desde) &
+                        (df["FechaRadicacion"] <= hasta)]
+
             total = len(df)
             radicadas = df[df["Estado"] == "Radicada"]
             total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
@@ -123,10 +145,10 @@ def main_app():
             col2.metric("💰 Valor total", f"${total_valor:,.0f}")
             col3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-            colpdf, colex = st.columns(2)
+            colex = st.container()
             with colpdf:
-                pdf_data = export_pdf(resumen_df)
-                st.download_button("📄 Descargar resumen PDF", pdf_data, file_name="dashboard_resumen.pdf", mime="application/pdf")
+                # pdf_data = export_pdf(resumen_df)
+                # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
             with colex:
                 excel_data = export_excel(df, resumen_df)
                 st.download_button("📊 Descargar resumen Excel", excel_data, file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
