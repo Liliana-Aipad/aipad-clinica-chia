@@ -227,6 +227,8 @@ def main_app():
         st.info("Módulo en construcción.")
 
     # ---- INVENTARIO (Formulario) ----
+
+    # ---- INVENTARIO (Formulario) ----
     with tab3:
         st.subheader("📝 Inventario (formulario de captura y edición)")
 
@@ -295,40 +297,53 @@ def main_app():
             vigencias = sorted([int(v) for v in pd.to_numeric(df["Vigencia"], errors="coerce").dropna().unique().tolist()] + [date.today().year])
             meses_opciones = list(MES_NOMBRE.values())
 
+            # ======= Estado y Fecha de Radicación fuera del form para habilitar al instante =======
+            ctop1, ctop2, ctop3 = st.columns(3)
+            with ctop1:
+                st.text_input("ID (automático)", value=def_val["ID"] or "", disabled=True)
+            with ctop2:
+                est_val = st.selectbox(
+                    "Estado",
+                    options=estados_opciones,
+                    index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0,
+                    key="estado_val"
+                )
+            with ctop3:
+                frad_disabled = (est_val != "Radicada")
+                frad_val = st.date_input(
+                    "Fecha de Radicación",
+                    value=def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today(),
+                    disabled=frad_disabled,
+                    key="frad_val"
+                )
+
+            # Fecha de movimiento mostrada (si existe), siempre bloqueada
+            st.text_input(
+                "Fecha de Movimiento (automática)",
+                value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
+                disabled=True
+            )
+
+            # ======= Resto del formulario =======
             with st.form("form_factura", clear_on_submit=False):
-                c1, c2, c3 = st.columns(3)
+                c1, c2 = st.columns(2)
                 with c1:
-                    # ID bloqueado SIEMPRE. Si es nuevo y queda vacío, se autogenera al guardar.
-                    st.text_input("ID (automático)", value=def_val["ID"], disabled=True)
                     num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
                     valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
-                with c2:
                     eps_val = st.selectbox("EPS", options=[""] + eps_opciones, index=([""]+eps_opciones).index(def_val["EPS"]) if def_val["EPS"] in ([""]+eps_opciones) else 0)
+                with c2:
                     vig_set = sorted(set(vigencias))
                     vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(def_val["Vigencia"]) if def_val["Vigencia"] in vig_set else 0)
-                    est_val = st.selectbox("Estado", options=estados_opciones, index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0)
-                with c3:
-                    # Fecha de Radicación: solo habilitada si Estado = Radicada
-                    frad_disabled = (est_val != "Radicada")
-                    frad_val = st.date_input(
-                        "Fecha de Radicación",
-                        value=def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today(),
-                        disabled=frad_disabled
-                    )
-                    # FechaMovimiento bloqueada (solo se actualiza automáticamente cuando cambia el Estado)
-                    st.text_input(
-                        "Fecha de Movimiento (automática)",
-                        value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
-                        disabled=True
-                    )
-                obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
+                    obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
 
                 submit = st.form_submit_button("💾 Guardar cambios", type="primary")
 
             if submit:
                 ahora = pd.Timestamp(datetime.now())
-                # Radicación: solo si estado es Radicada; en otro caso se limpia
-                frad_ts = _to_ts(frad_val) if est_val == "Radicada" else pd.NaT
+                # Tomar Estado y FechaRadicación de los widgets FUERA del form
+                estado_actual = st.session_state.get("estado_val", def_val["Estado"])
+                frad_widget = st.session_state.get("frad_val", date.today())
+                frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else pd.NaT
                 mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
 
                 # Armar fila nueva (ID se autogenera si viene vacío, con prefijo CHIA-####)
@@ -342,7 +357,7 @@ def main_app():
                     "Valor": float(valor_val),
                     "EPS": eps_val.strip(),
                     "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
-                    "Estado": est_val,
+                    "Estado": estado_actual,
                     "FechaRadicacion": frad_ts,
                     "Observaciones": obs_val.strip(),
                     "Mes": mes_calc
@@ -350,7 +365,7 @@ def main_app():
 
                 # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
                 estado_anterior = str(fila.get("Estado","")) if existe else ""
-                estado_cambio = (str(est_val) != estado_anterior) or (not existe)
+                estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
 
                 if existe:
                     nueva["FechaMovimiento"] = (ahora if estado_cambio else fila.get("FechaMovimiento", pd.NaT))
@@ -367,7 +382,7 @@ def main_app():
                 try:
                     guardar_inventario(df)
                     st.success("✅ Cambios guardados. El formulario fue limpiado.")
-                    # Limpiar formulario: borrar la factura activa y recargar
+                    # Limpiar formulario: borrar la factura activa y recargar (mantiene el tab actual)
                     st.session_state["factura_activa"] = ""
                     st.rerun()
                 except Exception as e:
