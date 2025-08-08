@@ -75,10 +75,10 @@ def main_app():
         if "EPS" in df.columns:
             st.subheader("📊 Facturación por EPS")
             resumen_eps = df.groupby("EPS").agg({
-                "Factura": "count",
+                "NumeroFactura": "count",
                 "Valor": "sum",
                 "Estado": lambda x: (x == "Radicada").sum()
-            }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+            }).rename(columns={"NumeroFactura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
             resumen_eps["% Avance"] = round((resumen_eps["Radicadas"] / resumen_eps["N° Facturas"]) * 100, 2)
             fig_eps = px.bar(resumen_eps, x=resumen_eps.index, y="N° Facturas", color_discrete_sequence=["blue"],
                             text="% Avance", title="Facturas por EPS")
@@ -87,10 +87,10 @@ def main_app():
         if "Mes" in df.columns:
             st.subheader("📅 Facturación por Mes")
             resumen_mes = df.groupby("Mes").agg({
-                "Factura": "count",
+                "NumeroFactura": "count",
                 "Valor": "sum",
                 "Estado": lambda x: (x == "Radicada").sum()
-            }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+            }).rename(columns={"NumeroFactura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
             resumen_mes["% Avance"] = round((resumen_mes["Radicadas"] / resumen_mes["N° Facturas"]) * 100, 2)
             fig_mes = px.area(resumen_mes, x=resumen_mes.index, y="N° Facturas", text="% Avance",
                             title="Facturas por Mes")
@@ -99,10 +99,10 @@ def main_app():
         if "Vigencia" in df.columns:
             st.subheader("📅 Facturación por Vigencia")
             resumen_vigencia = df.groupby("Vigencia").agg({
-                "Factura": "count",
+                "NumeroFactura": "count",
                 "Valor": "sum",
                 "Estado": lambda x: (x == "Radicada").sum()
-            }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+            }).rename(columns={"NumeroFactura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
             resumen_vigencia["% Avance"] = round((resumen_vigencia["Radicadas"] / resumen_vigencia["N° Facturas"]) * 100, 2)
             fig_vigencia = px.bar(resumen_vigencia, x=resumen_vigencia.index, y="N° Facturas",
                                 text="% Avance", title="Facturas por Vigencia")
