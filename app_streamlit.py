@@ -1,5 +1,5 @@
 # app_streamlit.py
-APP_VERSION = "2025-08-08 22:45"
+APP_VERSION = "2025-08-08 22:58"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
@@ -366,6 +366,9 @@ def main_app():
                     view.insert(0, "Seleccionar", sel_all)   # por defecto según el checkbox global
                     view.insert(1, "__idx", sub_page.index)   # índice original para mapear
 
+                    # Definir orden de columnas para "ocultar" __idx
+                    column_order = ["Seleccionar","ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones","__idx"]
+
                     edited = st.data_editor(
                         view,
                         hide_index=True,
@@ -373,7 +376,7 @@ def main_app():
                         num_rows="fixed",
                         column_config={
                             "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Marca las filas a mover", default=False),
-                            "__idx": st.column_config.Column("", width="small", disabled=True, hidden=True),
+                            "__idx": st.column_config.Column("", width="small", disabled=True),  # sin 'hidden'
                             "ID": st.column_config.Column("ID", disabled=True, width="small"),
                             "NumeroFactura": st.column_config.Column("Número de factura", disabled=True),
                             "EPS": st.column_config.Column("EPS", disabled=True),
@@ -383,11 +386,21 @@ def main_app():
                             "FechaMovimiento": st.column_config.Column("Fecha Movimiento", disabled=True),
                             "Observaciones": st.column_config.Column("Observaciones", disabled=True),
                         },
+                        column_order=column_order[:-1],  # no mostrar __idx
                         key=f"editor_{estado}_{current_page}",
                     )
 
-                    # Determinar seleccionados
-                    seleccionados = edited.loc[edited["Seleccionar"] == True, "__idx"].tolist()
+                    # Determinar seleccionados usando el df original 'view' y el estado del editor:
+                    # Como __idx no está visible, tomamos el índice relativo de las filas seleccionadas
+                    # y lo mapeamos contra sub_page.index en el mismo orden.
+                    try:
+                        # edited solo contiene columnas visibles; recuperamos 'Seleccionar'
+                        mask = edited["Seleccionar"].fillna(False).tolist()
+                    except Exception:
+                        mask = [False] * len(sub_page)
+
+                    # Mapeo: posiciones seleccionadas -> índices originales
+                    seleccionados = [idx for pos, idx in enumerate(sub_page.index.tolist()) if pos < len(mask) and mask[pos]]
 
                     st.divider()
                     c1, c2 = st.columns([2,1])
