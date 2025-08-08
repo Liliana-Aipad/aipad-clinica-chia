@@ -59,21 +59,6 @@ def export_pdf(resumen):
     buffer.seek(0)
     return buffer
 
-def export_excel(df, resumen):
-    buffer = BytesIO()
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Resumen"
-    for r in resumen.itertuples(index=False):
-        ws.append(list(r))
-    ws2 = wb.create_sheet("Facturas")
-    ws2.append(df.columns.tolist())
-    for row in df.itertuples(index=False):
-        ws2.append(list(row))
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer
-
 def login():
     st.sidebar.title("🔐 Ingreso")
     cedula = st.sidebar.text_input("Cédula")
@@ -141,9 +126,6 @@ def main_app():
                 colex = st.container()
                     # pdf_data = export_pdf(resumen_df)
                     # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
-        st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                    excel_data = export_excel(df, resumen_df)
-        st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
                 st.markdown("---")
 
