@@ -1,5 +1,9 @@
-APP_VERSION = "2025-08-08 20:15"
+# app_streamlit.py
+APP_VERSION = "2025-08-08 21:05"
+
 import streamlit as st
+st.set_page_config(layout="wide")  # Debe ser el primer comando de Streamlit
+
 import pandas as pd
 import os, re
 import plotly.express as px
@@ -96,7 +100,10 @@ def _select_tab(label: str):
 @st.cache_data
 def load_data():
     if not os.path.exists(INVENTARIO_FILE):
-        return pd.DataFrame()
+        # Si no existe, crear estructura vacía para evitar errores
+        cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
+                "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
+        return pd.DataFrame(columns=cols)
     df = pd.read_excel(INVENTARIO_FILE)
 
     # Normalizar fechas si existen
@@ -155,10 +162,10 @@ def mover_estado(df: pd.DataFrame, idx: int, nuevo_estado: str):
 
 # ====== APP ======
 def main_app():
-    st.set_page_config(layout="wide")
     st.caption(f"🆔 Versión: {APP_VERSION}")
     st.title("📊 AIPAD • Control de Radicación")
-    st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
+    if "usuario" in st.session_state and "rol" in st.session_state:
+        st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
     # Leer query param para re-seleccionar pestaña si aplica
     qp = {}
@@ -275,3 +282,208 @@ def main_app():
                         df, names="Vigencia", hole=0.5, title="Distribución de Facturas por Vigencia"
                     )
                     st.plotly_chart(fig_vig_pie, use_container_width=True)
+
+    # ---- KANBAN ----
+    with tab2:
+        st.subheader("📌 Kanban")
+        if df.empty:
+            st.info("No hay datos para mostrar.")
+        else:
+            cols = st.columns(4)
+            estado_to_col = dict(zip(ESTADOS, cols))
+            for estado, col in estado_to_col.items():
+                with col:
+                    st.markdown(f"### {estado}")
+                    subdf = df[df["Estado"] == estado].copy()
+                    if subdf.empty:
+                        st.caption("— sin facturas —")
+                    else:
+                        for i, (idx, row) in enumerate(subdf.sort_values(by=["FechaMovimiento","NumeroFactura"], ascending=[False, True]).iterrows(), start=1):
+                            with st.container(border=True):
+                                st.markdown(f"**{row.get('NumeroFactura','')}**")
+                                st.caption(f"ID: {row.get('ID','')} • EPS: {row.get('EPS','')} • Vigencia: {row.get('Vigencia','')}")
+                                st.caption(f"Valor: ${float(row.get('Valor',0) or 0):,.0f}")
+                                c1, c2 = st.columns([2,1])
+                                with c1:
+                                    nuevo = st.selectbox(
+                                        "Mover a:",
+                                        options=[estado] + [e for e in ESTADOS if e != estado],
+                                        index=0,
+                                        key=f"mv_{idx}"
+                                    )
+                                with c2:
+                                    if st.button("Aplicar", key=f"btn_mv_{idx}"):
+                                        mover_estado(df, idx, nuevo)
+                                        st.success(f"Factura {row.get('NumeroFactura','')} → {nuevo}")
+                                        _set_query_params(tab="kanban")
+                                        st.rerun()
+
+    # ---- GESTIÓN (Formulario) ----
+    with tab3:
+        st.subheader("📝 Gestión")
+
+        df = load_data().copy()
+
+        # Asegurar columnas mínimas
+        cols_needed = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
+                    "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
+        for c in cols_needed:
+            if c not in df.columns:
+                df[c] = pd.NA
+
+        # Tipos
+        df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
+        for c in ["FechaRadicacion","FechaMovimiento"]:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+
+        # Búsqueda
+        colb1, colb2 = st.columns([2,1])
+        with colb1:
+            q_factura = st.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
+        with colb2:
+            buscar = st.button("Buscar / Cargar", type="primary")
+
+        if buscar and q_factura.strip():
+            st.session_state["factura_activa"] = q_factura.strip()
+
+        numero_activo = st.session_state.get("factura_activa", "")
+
+        if not numero_activo:
+            st.info("Ingresa un número de factura y presiona **Buscar / Cargar** para editar o crear.")
+        else:
+            existe, idx, fila = registro_por_factura(df, numero_activo)
+            st.caption(f"Factura seleccionada: **{numero_activo}** {'(existente)' if existe else '(nueva)'}")
+
+            # Valores por defecto
+            if existe:
+                def_val = {
+                    "ID": str(fila.get("ID","") if pd.notna(fila.get("ID","")) else ""),
+                    "NumeroFactura": str(fila.get("NumeroFactura", numero_activo)),
+                    "Valor": float(fila.get("Valor", 0) if pd.notna(fila.get("Valor",0)) else 0),
+                    "EPS": str(fila.get("EPS","") if pd.notna(fila.get("EPS","")) else ""),
+                    "Vigencia": int(fila.get("Vigencia", date.today().year)) if pd.notna(fila.get("Vigencia", pd.NA)) else date.today().year,
+                    "Estado": str(fila.get("Estado","Pendiente") if pd.notna(fila.get("Estado", pd.NA)) else "Pendiente"),
+                    "FechaRadicacion": fila.get("FechaRadicacion", pd.NaT),
+                    "FechaMovimiento": fila.get("FechaMovimiento", pd.NaT),
+                    "Observaciones": str(fila.get("Observaciones","") if pd.notna(fila.get("Observaciones", pd.NA)) else ""),
+                    "Mes": str(fila.get("Mes","") if pd.notna(fila.get("Mes", pd.NA)) else ""),
+                }
+            else:
+                def_val = {
+                    "ID": "",  # se autoasigna
+                    "NumeroFactura": numero_activo,
+                    "Valor": 0.0,
+                    "EPS": "",
+                    "Vigencia": date.today().year,
+                    "Estado": "Pendiente",
+                    "FechaRadicacion": pd.NaT,
+                    "FechaMovimiento": pd.NaT,
+                    "Observaciones": "",
+                    "Mes": ""
+                }
+
+            estados_opciones = ESTADOS
+            eps_opciones = sorted([e for e in df["EPS"].dropna().astype(str).unique().tolist() if e]) or []
+            vigencias = sorted([int(v) for v in pd.to_numeric(df["Vigencia"], errors="coerce").dropna().unique().tolist()] + [date.today().year])
+
+            # ======= Estado y Fecha de Radicación fuera del form para habilitar al instante =======
+            ctop1, ctop2, ctop3 = st.columns(3)
+            with ctop1:
+                st.text_input("ID (automático)", value=def_val["ID"] or "", disabled=True)
+            with ctop2:
+                est_val = st.selectbox(
+                    "Estado",
+                    options=estados_opciones,
+                    index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0,
+                    key="estado_val"
+                )
+            with ctop3:
+                frad_disabled = (est_val != "Radicada")
+                frad_val = st.date_input(
+                    "Fecha de Radicación",
+                    value=def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today(),
+                    disabled=frad_disabled,
+                    key="frad_val"
+                )
+
+            # Fecha de movimiento mostrada (si existe), siempre bloqueada
+            st.text_input(
+                "Fecha de Movimiento (automática)",
+                value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
+                disabled=True
+            )
+
+            # ======= Resto del formulario =======
+            with st.form("form_factura", clear_on_submit=False):
+                c1, c2 = st.columns(2)
+                with c1:
+                    num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
+                    valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
+                    eps_val = st.selectbox("EPS", options=[""] + eps_opciones, index=([""]+eps_opciones).index(def_val["EPS"]) if def_val["EPS"] in ([""]+eps_opciones) else 0)
+                with c2:
+                    vig_set = sorted(set(vigencias))
+                    vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(def_val["Vigencia"]) if def_val["Vigencia"] in vig_set else 0)
+                    obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
+
+                submit = st.form_submit_button("💾 Guardar cambios", type="primary")
+
+            if submit:
+                ahora = pd.Timestamp(datetime.now())
+                # Tomar Estado y FechaRadicación de los widgets FUERA del form
+                estado_actual = st.session_state.get("estado_val", def_val["Estado"])
+                frad_widget = st.session_state.get("frad_val", date.today())
+                frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else pd.NaT
+                mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
+
+                # Armar fila nueva (ID se autogenera si viene vacío, con prefijo CHIA-####)
+                new_id = def_val["ID"]
+                if not new_id:  # si está vacío o no existe
+                    new_id = siguiente_id(df) if not existe else def_val["ID"]
+
+                nueva = {
+                    "ID": new_id,
+                    "NumeroFactura": str(num_val).strip(),
+                    "Valor": float(valor_val),
+                    "EPS": eps_val.strip(),
+                    "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
+                    "Estado": estado_actual,
+                    "FechaRadicacion": frad_ts,
+                    "Observaciones": obs_val.strip(),
+                    "Mes": mes_calc
+                }
+
+                # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
+                estado_anterior = str(fila.get("Estado","")) if existe else ""
+                estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
+
+                if existe:
+                    nueva["FechaMovimiento"] = (ahora if estado_cambio else fila.get("FechaMovimiento", pd.NaT))
+                else:
+                    nueva["FechaMovimiento"] = ahora
+
+                # Insertar/actualizar
+                if existe:
+                    for k, v in nueva.items():
+                        df.at[idx, k] = v
+                else:
+                    df = pd.concat([df, pd.DataFrame([nueva])], ignore_index=True)
+
+                try:
+                    guardar_inventario(df)
+                    st.success("✅ Cambios guardados. El formulario fue limpiado.")
+                    # Limpiar formulario sin ir al Dashboard y mantener pestaña Gestión
+                    st.session_state["factura_activa"] = ""
+                    # limpiar widgets usados
+                    for k in ["estado_val", "frad_val", "buscar_factura_input"]:
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    _set_query_params(tab="gestion")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error guardando el inventario: {e}")
+
+# ====== BOOT ======
+if "autenticado" not in st.session_state:
+    login()
+elif st.session_state.get("autenticado"):
+    main_app()
