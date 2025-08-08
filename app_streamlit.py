@@ -21,6 +21,10 @@ def load_data():
 
 def save_data(df):
     try:
+        # Calcular automáticamente el campo "Mes" a partir de "FechaRadicacion"
+        if "FechaRadicacion" in df.columns:
+            df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.strftime('%B').fillna("")
+            df["Mes"] = df["Mes"].str.capitalize()
         df.to_excel(INVENTARIO_FILE, index=False)
         now = datetime.now().strftime("%Y-%m-%d_%H-%M")
         backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
@@ -85,16 +89,25 @@ def main_app():
         st.subheader("📝 Editar Inventario")
 
         if not df.empty:
+            estados_opciones = ["Pendiente", "Auditada", "Subsanada", "Radicada"]
+            df["Estado"] = df["Estado"].astype(str)
+            df["Estado"] = df["Estado"].apply(lambda x: x if x in estados_opciones else "Pendiente")
+
             edited_df = st.data_editor(
                 df,
                 num_rows="dynamic",
                 use_container_width=True,
+                column_config={
+                    "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
+                    "FechaRadicacion": st.column_config.DateColumn("Fecha de Radicación", format="YYYY-MM-DD"),
+                    "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD"),
+                },
                 key="editor"
             )
             if st.button("💾 Guardar cambios"):
                 success = save_data(edited_df)
                 if success:
-                    st.success("✅ Cambios guardados y respaldo creado.")
+                    st.success("✅ Cambios guardados, respaldo creado y mes calculado automáticamente.")
                     st.cache_data.clear()
                     st.rerun()
         else:
