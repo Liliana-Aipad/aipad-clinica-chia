@@ -121,7 +121,7 @@ def main_app():
 
     df = load_data()
 
-    tab1, tab2, tab3 = st.tabs(["📋 Dashboard", "📌 Kanban", "📝 Inventario"])
+    tab1, tab2, tab3 = st.tabs(["📋 Dashboard", "📌 Kanban", "📝 Gestión"])
 
     # ---- DASHBOARD ----
     with tab1:
