@@ -5,15 +5,12 @@ import os
 import plotly.express as px
 from datetime import datetime
 
-# Ruta del archivo principal
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
 USUARIOS_FILE = "usuarios.xlsx"
 BACKUP_DIR = "backups"
 
-# Crear carpeta de backups si no existe
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# Cargar datos
 @st.cache_data
 def load_data():
     if os.path.exists(INVENTARIO_FILE):
@@ -22,17 +19,16 @@ def load_data():
     else:
         return pd.DataFrame()
 
-# Guardar backup
-def backup_data(df):
+def save_data(df):
+    df.to_excel(INVENTARIO_FILE, index=False)
     now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    filename = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
-    df.to_excel(filename, index=False)
+    backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
+    df.to_excel(backup_file, index=False)
 
-# Login
 def login():
     st.sidebar.title("🔐 Ingreso")
-    cedula = st.sidebar.text_input("Cédula", key="cedula")
-    contrasena = st.sidebar.text_input("Contraseña", type="password", key="contrasena")
+    cedula = st.sidebar.text_input("Cédula")
+    contrasena = st.sidebar.text_input("Contraseña", type="password")
     if st.sidebar.button("Ingresar"):
         try:
             usuarios_df = pd.read_excel(USUARIOS_FILE, dtype=str)
@@ -49,7 +45,6 @@ def login():
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
 
-# App principal
 def main_app():
     st.title("📊 AIPAD Control de Radicación")
     st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`")
@@ -57,11 +52,9 @@ def main_app():
 
     df = load_data()
 
-    # Realizar backup automáticamente
-    if not df.empty:
-        backup_data(df)
-
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Dashboard", "📌 Kanban", "📁 Entregas", "📄 Reportes"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 Dashboard", "📌 Kanban", "📁 Entregas", "📄 Reportes", "📝 Inventario"
+    ])
 
     with tab1:
         st.subheader("📈 Avance general del proyecto")
@@ -82,17 +75,27 @@ def main_app():
             if "Mes" in df.columns:
                 fig2 = px.bar(df, x="Mes", color="Estado", title="Cuentas procesadas por mes", barmode="group")
                 st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.info("Agrega una columna 'Mes' al inventario para ver evolución mensual.")
+
+    with tab5:
+        st.subheader("📝 Editar Inventario")
+
+        if not df.empty:
+            edited_df = st.data_editor(
+                df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="editor"
+            )
+            if st.button("💾 Guardar cambios"):
+                save_data(edited_df)
+                st.success("Inventario actualizado y respaldo creado.")
         else:
-            st.info("No se encontró el archivo de inventario.")
+            st.warning("No hay datos para mostrar.")
 
     with tab2:
         st.subheader("Kanban (en desarrollo)")
-
     with tab3:
         st.subheader("Control de entregas (en desarrollo)")
-
     with tab4:
         st.subheader("Generar reportes (en desarrollo)")
 
