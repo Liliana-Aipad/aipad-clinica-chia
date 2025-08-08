@@ -1,8 +1,8 @@
 
-APP_VERSION = "2025-08-08 19:45"
+APP_VERSION = "2025-08-08 20:15"
 import streamlit as st
 import pandas as pd
-import os
+import os, re
 import plotly.express as px
 from datetime import datetime, date
 
@@ -43,13 +43,30 @@ def registro_por_factura(df: pd.DataFrame, numero_factura: str):
         return True, idx, df.loc[idx]
     return False, None, None
 
+def _id_num(id_str):
+    """Extrae el número del ID con formato CHIA-0001; si no coincide, intenta convertir a int.
+       Retorna None si no hay número válido.
+    """
+    s = str(id_str).strip()
+    m = re.match(r"^CHIA-(\d+)$", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except:
+            return None
+    # fallback: intentar int directo
+    try:
+        return int(float(s))
+    except:
+        return None
+
 def siguiente_id(df: pd.DataFrame):
-    """Calcula el siguiente ID numérico disponible. Si no hay, inicia en 1."""
+    """Calcula el siguiente ID con prefijo CHIA-#### (relleno a 4 dígitos)."""
     if "ID" not in df.columns or df["ID"].dropna().empty:
-        return 1
-    # Intentar convertir a numérico
-    s = pd.to_numeric(df["ID"], errors="coerce").dropna()
-    return int(s.max()) + 1 if not s.empty else 1
+        return "CHIA-0001"
+    nums = df["ID"].apply(_id_num).dropna()
+    n = int(nums.max()) + 1 if not nums.empty else 1
+    return f"CHIA-{n:04d}"
 
 # ====== DATA ======
 @st.cache_data
@@ -314,7 +331,7 @@ def main_app():
                 frad_ts = _to_ts(frad_val) if est_val == "Radicada" else pd.NaT
                 mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
 
-                # Armar fila nueva (ID se autogenera si viene vacío)
+                # Armar fila nueva (ID se autogenera si viene vacío, con prefijo CHIA-####)
                 new_id = def_val["ID"]
                 if not new_id:  # si está vacío o no existe
                     new_id = siguiente_id(df) if not existe else def_val["ID"]
@@ -349,8 +366,9 @@ def main_app():
 
                 try:
                     guardar_inventario(df)
-                    st.success("✅ Cambios guardados.")
-                    st.session_state["factura_activa"] = nueva["NumeroFactura"]
+                    st.success("✅ Cambios guardados. El formulario fue limpiado.")
+                    # Limpiar formulario: borrar la factura activa y recargar
+                    st.session_state["factura_activa"] = ""
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error guardando el inventario: {e}")
