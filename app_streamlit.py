@@ -1,5 +1,5 @@
 # app_streamlit.py
-APP_VERSION = "2025-08-08 22:10"
+APP_VERSION = "2025-08-08 22:45"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
@@ -355,26 +355,39 @@ def main_app():
                         st.session_state[pg_key] = min(total_pages, current_page+1)
                         st.rerun()
 
-                    # Selección por fila en la página
+                    # Selección por fila en la página (sin listar textos; todo dentro del editor)
                     st.divider()
                     sel_all_key = f"sel_all_{estado}_{current_page}"
                     sel_all = st.checkbox("Seleccionar todo (esta página)", key=sel_all_key, value=False)
 
-                    # Tabla simplificada
+                    # Vista de la página con columna 'Seleccionar' editable y un índice oculto
                     cols_mostrar = ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"]
                     view = sub_page[cols_mostrar].copy()
+                    view.insert(0, "Seleccionar", sel_all)   # por defecto según el checkbox global
+                    view.insert(1, "__idx", sub_page.index)   # índice original para mapear
 
-                    # Agregar checkbox por fila (máx per_page)
-                    seleccionados = []
-                    for ridx, (orig_idx, row) in enumerate(view.iterrows()):
-                        ck_key = f"sel_{estado}_{current_page}_{int(ridx)}_{int(orig_idx)}"
-                        default_val = st.session_state.get(sel_all_key, False)
-                        val = st.checkbox(f"Seleccionar — ID {row['ID']} • Factura {row['NumeroFactura']} • EPS {row['EPS']} • Vig {row['Vigencia']}", key=ck_key, value=default_val)
-                        if val:
-                            seleccionados.append(orig_idx)
+                    edited = st.data_editor(
+                        view,
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        column_config={
+                            "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Marca las filas a mover", default=False),
+                            "__idx": st.column_config.Column("", width="small", disabled=True, hidden=True),
+                            "ID": st.column_config.Column("ID", disabled=True, width="small"),
+                            "NumeroFactura": st.column_config.Column("Número de factura", disabled=True),
+                            "EPS": st.column_config.Column("EPS", disabled=True),
+                            "Vigencia": st.column_config.Column("Vigencia", disabled=True, width="small"),
+                            "Valor": st.column_config.Column("Valor", disabled=True),
+                            "FechaRadicacion": st.column_config.Column("Fecha Radicación", disabled=True),
+                            "FechaMovimiento": st.column_config.Column("Fecha Movimiento", disabled=True),
+                            "Observaciones": st.column_config.Column("Observaciones", disabled=True),
+                        },
+                        key=f"editor_{estado}_{current_page}",
+                    )
 
-                    # Mostrar dataframe (solo lectura) para contexto
-                    st.dataframe(view, use_container_width=True, hide_index=True)
+                    # Determinar seleccionados
+                    seleccionados = edited.loc[edited["Seleccionar"] == True, "__idx"].tolist()
 
                     st.divider()
                     c1, c2 = st.columns([2,1])
