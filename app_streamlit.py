@@ -95,6 +95,8 @@ def main_app():
                 success = save_data(edited_df)
                 if success:
                     st.success("✅ Cambios guardados y respaldo creado.")
+                    st.cache_data.clear()
+                    st.rerun()
         else:
             st.warning("No hay datos para mostrar.")
 
