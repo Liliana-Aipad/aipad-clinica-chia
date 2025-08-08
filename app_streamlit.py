@@ -31,9 +31,6 @@ def load_data():
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
-    else:
-        return pd.DataFrame()
-
 def export_pdf(resumen):
     return None
     buffer = BytesIO()
@@ -168,9 +165,6 @@ def main_app():
                     with col2:
                         fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
                         st.plotly_chart(fig_count_vig, use_container_width=True)
-    else:
-                st.warning("No hay datos para mostrar en el dashboard.")
-
         with tab2:
             st.subheader("Kanban (en desarrollo)")
         with tab3:
