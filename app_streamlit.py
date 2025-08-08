@@ -3,13 +3,25 @@ import streamlit as st
 import pandas as pd
 import os
 import plotly.express as px
-import plotly.graph_objects as go
+from io import BytesIO
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from openpyxl import Workbook
 
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
 USUARIOS_FILE = "usuarios.xlsx"
 BACKUP_DIR = "backups"
-
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+# Configurar colores por estado
+estado_colores = {
+    "Radicada": "green",
+    "Pendiente": "red",
+    "Auditada": "orange",
+    "Subsanada": "blue"
+}
 
 @st.cache_data
 def load_data():
@@ -21,6 +33,45 @@ def load_data():
         return df
     else:
         return pd.DataFrame()
+
+def export_pdf(resumen):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = [Paragraph("Resumen Gerencial - Dashboard AIPAD", styles["Title"]), Spacer(1, 12)]
+
+    table_data = [resumen.columns.tolist()] + resumen.values.tolist()
+    table = Table(table_data)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+    ]))
+    elements.append(table)
+    elements.append(Spacer(1, 24))
+    elements.append(Paragraph("Este reporte contiene las métricas clave del avance del proyecto.", styles["Normal"]))
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+def export_excel(df, resumen):
+    buffer = BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Resumen"
+    for r in resumen.itertuples(index=False):
+        ws.append(list(r))
+    ws2 = wb.create_sheet("Facturas")
+    ws2.append(df.columns.tolist())
+    for row in df.itertuples(index=False):
+        ws2.append(list(row))
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 def login():
     st.sidebar.title("🔐 Ingreso")
@@ -62,28 +113,40 @@ def main_app():
             total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
             avance = round(len(radicadas) / total * 100, 2) if total else 0
 
+            resumen_df = pd.DataFrame({
+                "Métrica": ["Total facturas", "Valor total", "Avance (%)"],
+                "Valor": [total, f"${total_valor:,.0f}", f"{avance}%"]
+            })
+
             col1, col2, col3 = st.columns(3)
             col1.metric("📦 Total facturas", total)
             col2.metric("💰 Valor total", f"${total_valor:,.0f}")
             col3.metric("📊 Avance (radicadas)", f"{avance}%")
 
+            colpdf, colex = st.columns(2)
+            with colpdf:
+                pdf_data = export_pdf(resumen_df)
+                st.download_button("📄 Descargar resumen PDF", pdf_data, file_name="dashboard_resumen.pdf", mime="application/pdf")
+            with colex:
+                excel_data = export_excel(df, resumen_df)
+                st.download_button("📊 Descargar resumen Excel", excel_data, file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
             st.markdown("---")
 
-            fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado")
+            fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
+                                color="Estado", color_discrete_map=estado_colores)
             st.plotly_chart(fig_estado, use_container_width=True)
 
             st.markdown("## 🏥 Por EPS")
             col1, col2 = st.columns(2)
             with col1:
-                if "Valor" in df.columns:
-                    fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado",
-                                           barmode="group", title="Valor total por EPS",
-                                           text_auto=".2s")
-                    fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
-                    st.plotly_chart(fig_valor_eps, use_container_width=True)
+                fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
+                                       title="Valor total por EPS", text_auto=".2s", color_discrete_map=estado_colores)
+                fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
+                st.plotly_chart(fig_valor_eps, use_container_width=True)
             with col2:
                 fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS",
-                                       color="Estado", barmode="group", text_auto=True)
+                                       color="Estado", barmode="group", text_auto=True, color_discrete_map=estado_colores)
                 fig_count_eps.update_layout(xaxis={'categoryorder': 'total descending'})
                 st.plotly_chart(fig_count_eps, use_container_width=True)
 
@@ -92,11 +155,11 @@ def main_app():
                 col1, col2 = st.columns(2)
                 with col1:
                     fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes",
-                                            color="Estado", line_group="Estado")
+                                            color="Estado", line_group="Estado", color_discrete_map=estado_colores)
                     st.plotly_chart(fig_valor_mes, use_container_width=True)
                 with col2:
                     fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado",
-                                           barmode="stack", text_auto=True)
+                                           barmode="stack", text_auto=True, color_discrete_map=estado_colores)
                     st.plotly_chart(fig_count_mes, use_container_width=True)
 
             st.markdown("## 📆 Por Vigencia")
@@ -104,12 +167,12 @@ def main_app():
                 col1, col2 = st.columns(2)
                 with col1:
                     fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado",
-                                           barmode="group", title="Valor por Vigencia", text_auto=".2s")
+                                           barmode="group", title="Valor por Vigencia",
+                                           text_auto=".2s", color_discrete_map=estado_colores)
                     st.plotly_chart(fig_valor_vig, use_container_width=True)
                 with col2:
                     fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
                     st.plotly_chart(fig_count_vig, use_container_width=True)
-
         else:
             st.warning("No hay datos para mostrar en el dashboard.")
 
