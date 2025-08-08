@@ -110,104 +110,104 @@ def main_app():
         st.subheader("📈 Avance general del proyecto")
         if not df.empty:
 
-        st.markdown("### 🔍 Filtros")
-        with st.expander("Filtrar datos", expanded=False):
-            colf1, colf2, colf3 = st.columns(3)
-            estados = df["Estado"].dropna().unique().tolist()
-            eps_lista = df["EPS"].dropna().unique().tolist()
-            fechas = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dropna()
+            st.markdown("### 🔍 Filtros")
+            with st.expander("Filtrar datos", expanded=False):
+                colf1, colf2, colf3 = st.columns(3)
+                estados = df["Estado"].dropna().unique().tolist()
+                eps_lista = df["EPS"].dropna().unique().tolist()
+                fechas = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dropna()
 
-            estado_sel = colf1.multiselect("Estado", sorted(estados), default=sorted(estados))
-            eps_sel = colf2.multiselect("EPS", sorted(eps_lista), default=sorted(eps_lista))
-            fecha_min = fechas.min() if not fechas.empty else None
-            fecha_max = fechas.max() if not fechas.empty else None
-            fecha_rango = colf3.date_input("Rango de fechas", (fecha_min, fecha_max))
+                estado_sel = colf1.multiselect("Estado", sorted(estados), default=sorted(estados))
+                eps_sel = colf2.multiselect("EPS", sorted(eps_lista), default=sorted(eps_lista))
+                fecha_min = fechas.min() if not fechas.empty else None
+                fecha_max = fechas.max() if not fechas.empty else None
+                fecha_rango = colf3.date_input("Rango de fechas", (fecha_min, fecha_max))
 
-            if fecha_rango and len(fecha_rango) == 2:
-                desde, hasta = pd.to_datetime(fecha_rango[0]), pd.to_datetime(fecha_rango[1])
-                df = df[(df["Estado"].isin(estado_sel)) &
-                        (df["EPS"].isin(eps_sel)) &
-                        (df["FechaRadicacion"] >= desde) &
-                        (df["FechaRadicacion"] <= hasta)]
+                if fecha_rango and len(fecha_rango) == 2:
+                    desde, hasta = pd.to_datetime(fecha_rango[0]), pd.to_datetime(fecha_rango[1])
+                    df = df[(df["Estado"].isin(estado_sel)) &
+                            (df["EPS"].isin(eps_sel)) &
+                            (df["FechaRadicacion"] >= desde) &
+                            (df["FechaRadicacion"] <= hasta)]
 
-            total = len(df)
-            radicadas = df[df["Estado"] == "Radicada"]
-            total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
-            avance = round(len(radicadas) / total * 100, 2) if total else 0
+                total = len(df)
+                radicadas = df[df["Estado"] == "Radicada"]
+                total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
+                avance = round(len(radicadas) / total * 100, 2) if total else 0
 
-            resumen_df = pd.DataFrame({
-                "Métrica": ["Total facturas", "Valor total", "Avance (%)"],
-                "Valor": [total, f"${total_valor:,.0f}", f"{avance}%"]
-            })
+                resumen_df = pd.DataFrame({
+                    "Métrica": ["Total facturas", "Valor total", "Avance (%)"],
+                    "Valor": [total, f"${total_valor:,.0f}", f"{avance}%"]
+                })
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("📦 Total facturas", total)
-            col2.metric("💰 Valor total", f"${total_valor:,.0f}")
-            col3.metric("📊 Avance (radicadas)", f"{avance}%")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("📦 Total facturas", total)
+                col2.metric("💰 Valor total", f"${total_valor:,.0f}")
+                col3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-            colex = st.container()
-            with colpdf:
-                # pdf_data = export_pdf(resumen_df)
-                # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
-            with colex:
-                excel_data = export_excel(df, resumen_df)
-                st.download_button("📊 Descargar resumen Excel", excel_data, file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                colex = st.container()
+                with colpdf:
+                    # pdf_data = export_pdf(resumen_df)
+                    # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
+                with colex:
+                    excel_data = export_excel(df, resumen_df)
+                    st.download_button("📊 Descargar resumen Excel", excel_data, file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            st.markdown("---")
+                st.markdown("---")
 
-            fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
-                                color="Estado", color_discrete_map=estado_colores)
-            st.plotly_chart(fig_estado, use_container_width=True)
+                fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
+                                    color="Estado", color_discrete_map=estado_colores)
+                st.plotly_chart(fig_estado, use_container_width=True)
 
-            st.markdown("## 🏥 Por EPS")
-            col1, col2 = st.columns(2)
-            with col1:
-                fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
-                                       title="Valor total por EPS", text_auto=".2s", color_discrete_map=estado_colores)
-                fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
-                st.plotly_chart(fig_valor_eps, use_container_width=True)
-            with col2:
-                fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS",
-                                       color="Estado", barmode="group", text_auto=True, color_discrete_map=estado_colores)
-                fig_count_eps.update_layout(xaxis={'categoryorder': 'total descending'})
-                st.plotly_chart(fig_count_eps, use_container_width=True)
-
-            st.markdown("## 📅 Por Mes")
-            if "Mes" in df.columns:
+                st.markdown("## 🏥 Por EPS")
                 col1, col2 = st.columns(2)
                 with col1:
-                    fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes",
-                                            color="Estado", line_group="Estado", color_discrete_map=estado_colores)
-                    st.plotly_chart(fig_valor_mes, use_container_width=True)
+                    fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
+                                           title="Valor total por EPS", text_auto=".2s", color_discrete_map=estado_colores)
+                    fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
+                    st.plotly_chart(fig_valor_eps, use_container_width=True)
                 with col2:
-                    fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado",
-                                           barmode="stack", text_auto=True, color_discrete_map=estado_colores)
-                    st.plotly_chart(fig_count_mes, use_container_width=True)
+                    fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS",
+                                           color="Estado", barmode="group", text_auto=True, color_discrete_map=estado_colores)
+                    fig_count_eps.update_layout(xaxis={'categoryorder': 'total descending'})
+                    st.plotly_chart(fig_count_eps, use_container_width=True)
 
-            st.markdown("## 📆 Por Vigencia")
-            if "Vigencia" in df.columns:
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado",
-                                           barmode="group", title="Valor por Vigencia",
-                                           text_auto=".2s", color_discrete_map=estado_colores)
-                    st.plotly_chart(fig_valor_vig, use_container_width=True)
-                with col2:
-                    fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
-                    st.plotly_chart(fig_count_vig, use_container_width=True)
-        else:
-            st.warning("No hay datos para mostrar en el dashboard.")
+                st.markdown("## 📅 Por Mes")
+                if "Mes" in df.columns:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes",
+                                                color="Estado", line_group="Estado", color_discrete_map=estado_colores)
+                        st.plotly_chart(fig_valor_mes, use_container_width=True)
+                    with col2:
+                        fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado",
+                                               barmode="stack", text_auto=True, color_discrete_map=estado_colores)
+                        st.plotly_chart(fig_count_mes, use_container_width=True)
 
-    with tab2:
-        st.subheader("Kanban (en desarrollo)")
-    with tab3:
-        st.subheader("Control de entregas (en desarrollo)")
-    with tab4:
-        st.subheader("Generar reportes (en desarrollo)")
-    with tab5:
-        st.subheader("Edición de inventario (módulo independiente)")
+                st.markdown("## 📆 Por Vigencia")
+                if "Vigencia" in df.columns:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado",
+                                               barmode="group", title="Valor por Vigencia",
+                                               text_auto=".2s", color_discrete_map=estado_colores)
+                        st.plotly_chart(fig_valor_vig, use_container_width=True)
+                    with col2:
+                        fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
+                        st.plotly_chart(fig_count_vig, use_container_width=True)
+            else:
+                st.warning("No hay datos para mostrar en el dashboard.")
 
-if "autenticado" not in st.session_state:
-    login()
-if st.session_state.get("autenticado", False):
-    main_app()
+        with tab2:
+            st.subheader("Kanban (en desarrollo)")
+        with tab3:
+            st.subheader("Control de entregas (en desarrollo)")
+        with tab4:
+            st.subheader("Generar reportes (en desarrollo)")
+        with tab5:
+            st.subheader("Edición de inventario (módulo independiente)")
+
+    if "autenticado" not in st.session_state:
+        login()
+    if st.session_state.get("autenticado", False):
+        main_app()
