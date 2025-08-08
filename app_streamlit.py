@@ -74,7 +74,6 @@ def login():
                 st.session_state["autenticado"] = True
                 st.session_state["usuario"] = usuario.iloc[0]["Cedula"]
                 st.session_state["rol"] = usuario.iloc[0]["Rol"]
-    else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
