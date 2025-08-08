@@ -1,10 +1,10 @@
-
 APP_VERSION = "2025-08-08 20:15"
 import streamlit as st
 import pandas as pd
 import os, re
 import plotly.express as px
 from datetime import datetime, date
+import streamlit.components.v1 as components
 
 # === Archivos esperados en la raíz ===
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -17,6 +17,8 @@ ESTADO_COLORES = {
     "Auditada":  "orange",
     "Subsanada": "blue",
 }
+
+ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
 
 MES_NOMBRE = {
     1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -68,6 +70,28 @@ def siguiente_id(df: pd.DataFrame):
     n = int(nums.max()) + 1 if not nums.empty else 1
     return f"CHIA-{n:04d}"
 
+def _set_query_params(**kwargs):
+    # Compatibilidad con versiones nuevas/viejas de Streamlit
+    try:
+        st.query_params.clear()
+        for k,v in kwargs.items():
+            st.query_params[k] = v
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
+
+def _select_tab(label: str):
+    """Fuerza seleccionar una pestaña por su etiqueta (helper con un poco de JS seguro)."""
+    js = f"""
+    <script>
+    window.addEventListener('load', () => {{
+        const labels = Array.from(parent.document.querySelectorAll('button[role="tab"]'));
+        const target = labels.find(el => el.innerText.trim() === "{label}");
+        if (target) target.click();
+    }});
+    </script>
+    """
+    components.html(js, height=0, scrolling=False)
+
 # ====== DATA ======
 @st.cache_data
 def load_data():
@@ -92,6 +116,11 @@ def load_data():
     if "Vigencia" in df.columns:
         df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
 
+    # Normalizar textos clave
+    if "Estado" in df.columns:
+        df["Estado"] = df["Estado"].astype(str).str.strip()
+        df.loc[~df["Estado"].isin(ESTADOS), "Estado"] = "Pendiente"
+
     return df
 
 # ====== Auth ======
@@ -107,10 +136,22 @@ def login():
                 st.session_state["autenticado"] = True
                 st.session_state["usuario"] = ok.iloc[0]["Cedula"]
                 st.session_state["rol"] = ok.iloc[0]["Rol"]
+                st.rerun()
             else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
+
+# ====== Kanban Helpers ======
+def mover_estado(df: pd.DataFrame, idx: int, nuevo_estado: str):
+    ahora = pd.Timestamp(datetime.now())
+    df.at[idx, "Estado"] = nuevo_estado
+    # Si pasa a Radicada y no tiene FechaRadicacion, habilitarla hoy por defecto
+    if nuevo_estado == "Radicada" and pd.isna(df.at[idx, "FechaRadicacion"]):
+        df.at[idx, "FechaRadicacion"] = ahora.normalize()
+        df.at[idx, "Mes"] = MES_NOMBRE.get(int(ahora.month), "")
+    df.at[idx, "FechaMovimiento"] = ahora
+    guardar_inventario(df)
 
 # ====== APP ======
 def main_app():
@@ -119,9 +160,23 @@ def main_app():
     st.title("📊 AIPAD • Control de Radicación")
     st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
+    # Leer query param para re-seleccionar pestaña si aplica
+    qp = {}
+    try:
+        qp = dict(st.query_params)
+    except Exception:
+        qp = st.experimental_get_query_params()
+
     df = load_data()
 
-    tab1, tab2, tab3 = st.tabs(["📋 Dashboard", "📌 Kanban", "📝 Inventario"])
+    tab_labels = ["📋 Dashboard", "📌 Kanban", "📝 Gestión"]
+    tab1, tab2, tab3 = st.tabs(tab_labels)
+
+    # Si hay query param ?tab=kanban o ?tab=gestion, forzar selección
+    if qp.get("tab", [""])[0] == "kanban":
+        _select_tab("📌 Kanban")
+    elif qp.get("tab", [""])[0] == "gestion":
+        _select_tab("📝 Gestión")
 
     # ---- DASHBOARD ----
     with tab1:
@@ -220,176 +275,3 @@ def main_app():
                         df, names="Vigencia", hole=0.5, title="Distribución de Facturas por Vigencia"
                     )
                     st.plotly_chart(fig_vig_pie, use_container_width=True)
-
-    # ---- KANBAN ----
-    with tab2:
-        st.subheader("📌 Kanban")
-        st.info("Módulo en construcción.")
-
-    # ---- INVENTARIO (Formulario) ----
-
-    # ---- INVENTARIO (Formulario) ----
-    with tab3:
-        st.subheader("📝 Inventario (formulario de captura y edición)")
-
-        df = load_data().copy()
-
-        # Asegurar columnas mínimas
-        cols_needed = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
-                    "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
-        for c in cols_needed:
-            if c not in df.columns:
-                df[c] = pd.NA
-
-        # Tipos
-        df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
-        for c in ["FechaRadicacion","FechaMovimiento"]:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-
-        # Búsqueda
-        colb1, colb2 = st.columns([2,1])
-        with colb1:
-            q_factura = st.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
-        with colb2:
-            buscar = st.button("Buscar / Cargar", type="primary")
-
-        if buscar and q_factura.strip():
-            st.session_state["factura_activa"] = q_factura.strip()
-
-        numero_activo = st.session_state.get("factura_activa", "")
-
-        if not numero_activo:
-            st.info("Ingresa un número de factura y presiona **Buscar / Cargar** para editar o crear.")
-        else:
-            existe, idx, fila = registro_por_factura(df, numero_activo)
-            st.caption(f"Factura seleccionada: **{numero_activo}** {'(existente)' if existe else '(nueva)'}")
-
-            # Valores por defecto
-            if existe:
-                def_val = {
-                    "ID": str(fila.get("ID","") if pd.notna(fila.get("ID","")) else ""),
-                    "NumeroFactura": str(fila.get("NumeroFactura", numero_activo)),
-                    "Valor": float(fila.get("Valor", 0) if pd.notna(fila.get("Valor",0)) else 0),
-                    "EPS": str(fila.get("EPS","") if pd.notna(fila.get("EPS","")) else ""),
-                    "Vigencia": int(fila.get("Vigencia", date.today().year)) if pd.notna(fila.get("Vigencia", pd.NA)) else date.today().year,
-                    "Estado": str(fila.get("Estado","Pendiente") if pd.notna(fila.get("Estado", pd.NA)) else "Pendiente"),
-                    "FechaRadicacion": fila.get("FechaRadicacion", pd.NaT),
-                    "FechaMovimiento": fila.get("FechaMovimiento", pd.NaT),
-                    "Observaciones": str(fila.get("Observaciones","") if pd.notna(fila.get("Observaciones", pd.NA)) else ""),
-                    "Mes": str(fila.get("Mes","") if pd.notna(fila.get("Mes", pd.NA)) else ""),
-                }
-            else:
-                def_val = {
-                    "ID": "",  # se autoasigna
-                    "NumeroFactura": numero_activo,
-                    "Valor": 0.0,
-                    "EPS": "",
-                    "Vigencia": date.today().year,
-                    "Estado": "Pendiente",
-                    "FechaRadicacion": pd.NaT,
-                    "FechaMovimiento": pd.NaT,
-                    "Observaciones": "",
-                    "Mes": ""
-                }
-
-            estados_opciones = ["Pendiente","Auditada","Subsanada","Radicada"]
-            eps_opciones = sorted([e for e in df["EPS"].dropna().astype(str).unique().tolist() if e]) or []
-            vigencias = sorted([int(v) for v in pd.to_numeric(df["Vigencia"], errors="coerce").dropna().unique().tolist()] + [date.today().year])
-            meses_opciones = list(MES_NOMBRE.values())
-
-            # ======= Estado y Fecha de Radicación fuera del form para habilitar al instante =======
-            ctop1, ctop2, ctop3 = st.columns(3)
-            with ctop1:
-                st.text_input("ID (automático)", value=def_val["ID"] or "", disabled=True)
-            with ctop2:
-                est_val = st.selectbox(
-                    "Estado",
-                    options=estados_opciones,
-                    index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0,
-                    key="estado_val"
-                )
-            with ctop3:
-                frad_disabled = (est_val != "Radicada")
-                frad_val = st.date_input(
-                    "Fecha de Radicación",
-                    value=def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today(),
-                    disabled=frad_disabled,
-                    key="frad_val"
-                )
-
-            # Fecha de movimiento mostrada (si existe), siempre bloqueada
-            st.text_input(
-                "Fecha de Movimiento (automática)",
-                value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
-                disabled=True
-            )
-
-            # ======= Resto del formulario =======
-            with st.form("form_factura", clear_on_submit=False):
-                c1, c2 = st.columns(2)
-                with c1:
-                    num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
-                    valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
-                    eps_val = st.selectbox("EPS", options=[""] + eps_opciones, index=([""]+eps_opciones).index(def_val["EPS"]) if def_val["EPS"] in ([""]+eps_opciones) else 0)
-                with c2:
-                    vig_set = sorted(set(vigencias))
-                    vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(def_val["Vigencia"]) if def_val["Vigencia"] in vig_set else 0)
-                    obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
-
-                submit = st.form_submit_button("💾 Guardar cambios", type="primary")
-
-            if submit:
-                ahora = pd.Timestamp(datetime.now())
-                # Tomar Estado y FechaRadicación de los widgets FUERA del form
-                estado_actual = st.session_state.get("estado_val", def_val["Estado"])
-                frad_widget = st.session_state.get("frad_val", date.today())
-                frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else pd.NaT
-                mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
-
-                # Armar fila nueva (ID se autogenera si viene vacío, con prefijo CHIA-####)
-                new_id = def_val["ID"]
-                if not new_id:  # si está vacío o no existe
-                    new_id = siguiente_id(df) if not existe else def_val["ID"]
-
-                nueva = {
-                    "ID": new_id,
-                    "NumeroFactura": str(num_val).strip(),
-                    "Valor": float(valor_val),
-                    "EPS": eps_val.strip(),
-                    "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
-                    "Estado": estado_actual,
-                    "FechaRadicacion": frad_ts,
-                    "Observaciones": obs_val.strip(),
-                    "Mes": mes_calc
-                }
-
-                # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
-                estado_anterior = str(fila.get("Estado","")) if existe else ""
-                estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
-
-                if existe:
-                    nueva["FechaMovimiento"] = (ahora if estado_cambio else fila.get("FechaMovimiento", pd.NaT))
-                else:
-                    nueva["FechaMovimiento"] = ahora
-
-                # Insertar/actualizar
-                if existe:
-                    for k, v in nueva.items():
-                        df.at[idx, k] = v
-                else:
-                    df = pd.concat([df, pd.DataFrame([nueva])], ignore_index=True)
-
-                try:
-                    guardar_inventario(df)
-                    st.success("✅ Cambios guardados. El formulario fue limpiado.")
-                    # Limpiar formulario: borrar la factura activa y recargar (mantiene el tab actual)
-                    st.session_state["factura_activa"] = ""
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error guardando el inventario: {e}")
-
-# ====== BOOT ======
-if "autenticado" not in st.session_state:
-    login()
-elif st.session_state.get("autenticado"):
-    main_app()
