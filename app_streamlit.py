@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import os
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -22,19 +23,33 @@ def load_data():
     else:
         return pd.DataFrame()
 
-def save_data(df):
-    try:
-        if "FechaRadicacion" in df.columns:
-            df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.strftime("%B").fillna("")
-            df["Mes"] = df["Mes"].str.capitalize()
-        df.to_excel(INVENTARIO_FILE, index=False)
-        now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
-        df.to_excel(backup_file, index=False)
-        return True
-    except Exception as e:
-        st.error(f"❌ Error al guardar el archivo: {e}")
-        return False
+def avanzar_por_estado(df, agrupador):
+    conteo = df.groupby([agrupador, "Estado"]).size().unstack(fill_value=0)
+    conteo["Total"] = conteo.sum(axis=1)
+    for estado in ["Pendiente", "Auditada", "Subsanada", "Radicada"]:
+        if estado not in conteo.columns:
+            conteo[estado] = 0
+    for estado in ["Pendiente", "Auditada", "Subsanada", "Radicada"]:
+        conteo[f"% {estado}"] = (conteo[estado] / conteo["Total"]) * 100
+    return conteo.reset_index()
+
+def plot_estado_avance(df, agrupador):
+    data = avanzar_por_estado(df, agrupador)
+    fig = go.Figure()
+    for estado in ["Pendiente", "Auditada", "Subsanada", "Radicada"]:
+        fig.add_trace(go.Bar(
+            x=data[agrupador],
+            y=data[f"% {estado}"],
+            name=estado
+        ))
+    fig.update_layout(
+        barmode='stack',
+        title=f"📊 Avance porcentual por estado ({agrupador})",
+        yaxis_title="% avance",
+        xaxis_title=agrupador,
+        height=400
+    )
+    return fig
 
 def login():
     st.sidebar.title("🔐 Ingreso")
@@ -72,72 +87,56 @@ def main_app():
         st.subheader("📈 Avance general del proyecto")
         if not df.empty:
             total = len(df)
+            total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
             estados = df["Estado"].value_counts().to_dict()
-            procesadas = estados.get("Radicada", 0)
-            avance = round((procesadas / total) * 100, 2) if total else 0
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("📦 Total cuentas", total)
-            col2.metric("✅ Radicadas", procesadas)
-            col3.metric("📊 Avance (%)", f"{avance}%")
+            col1.metric("📦 Total facturas", total)
+            col2.metric("💰 Valor total", f"${total_valor:,.0f}")
+            col3.metric("📊 Estados registrados", len(estados))
 
-            fig1 = px.pie(df, names="Estado", title="Distribución por Estado", hole=0.4)
-            st.plotly_chart(fig1, use_container_width=True)
+            # Gráfico general por Estado
+            fig_estado = px.bar(df, x="Estado", title="Distribución general por Estado",
+                                color="Estado", color_discrete_sequence=px.colors.qualitative.Set2)
+            st.plotly_chart(fig_estado, use_container_width=True)
 
+            # Gráficos por EPS
+            st.subheader("🏥 Avance por EPS")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_eps_valor = px.bar(df, x="EPS", y="Valor", title="Valor total por EPS", color="EPS")
+                st.plotly_chart(fig_eps_valor, use_container_width=True)
+            with col2:
+                fig_eps_count = px.histogram(df, x="EPS", title="Número de facturas por EPS", color="EPS")
+                st.plotly_chart(fig_eps_count, use_container_width=True)
+            st.plotly_chart(plot_estado_avance(df, "EPS"), use_container_width=True)
+
+            # Gráficos por Mes
             if "Mes" in df.columns:
-                fig2 = px.bar(df, x="Mes", color="Estado", title="Cuentas procesadas por mes", barmode="group")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.subheader("📅 Avance por Mes")
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig_mes_valor = px.bar(df, x="Mes", y="Valor", title="Valor total por Mes", color="Mes")
+                    st.plotly_chart(fig_mes_valor, use_container_width=True)
+                with col2:
+                    fig_mes_count = px.histogram(df, x="Mes", title="Número de facturas por Mes", color="Mes")
+                    st.plotly_chart(fig_mes_count, use_container_width=True)
+                st.plotly_chart(plot_estado_avance(df, "Mes"), use_container_width=True)
 
-    with tab5:
-        st.subheader("📝 Editar Inventario")
+            # Gráficos por Vigencia
+            if "Vigencia" in df.columns:
+                st.subheader("📆 Avance por Vigencia")
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig_vig_valor = px.bar(df, x="Vigencia", y="Valor", title="Valor total por Vigencia", color="Vigencia")
+                    st.plotly_chart(fig_vig_valor, use_container_width=True)
+                with col2:
+                    fig_vig_count = px.histogram(df, x="Vigencia", title="Número de facturas por Vigencia", color="Vigencia")
+                    st.plotly_chart(fig_vig_count, use_container_width=True)
+                st.plotly_chart(plot_estado_avance(df, "Vigencia"), use_container_width=True)
 
-        if not df.empty:
-            estados_opciones = ["Pendiente", "Auditada", "Subsanada", "Radicada"]
-            df["Estado"] = df["Estado"].astype(str)
-            df["Estado"] = df["Estado"].apply(lambda x: x if x in estados_opciones else "Pendiente")
-
-            df_original = df.copy()
-
-            edited_df = st.data_editor(
-                df,
-                num_rows="dynamic",
-                use_container_width=True,
-                column_config={
-                    "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
-                    "FechaRadicacion": st.column_config.DateColumn("Fecha de Radicación", format="YYYY-MM-DD"),
-                    "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD", disabled=True),
-                },
-                key="editor"
-            )
-
-            advertencias = []
-
-            for i in edited_df.index:
-                if i in df_original.index:
-                    estado_anterior = df_original.at[i, "Estado"]
-                    estado_actual = edited_df.at[i, "Estado"]
-
-                    # Actualizar FechaMovimiento si cambió el estado
-                    if estado_actual != estado_anterior:
-                        edited_df.at[i, "FechaMovimiento"] = pd.Timestamp.now()
-
-                    # Revertir FechaRadicacion si no es Radicada
-                    if estado_actual != "Radicada":
-                        if pd.notnull(edited_df.at[i, "FechaRadicacion"]) and edited_df.at[i, "FechaRadicacion"] != df_original.at[i, "FechaRadicacion"]:
-                            advertencias.append(f"🔒 Fila {i + 2}: Solo puedes cambiar la Fecha de Radicación si el estado es 'Radicada'.")
-                            edited_df.at[i, "FechaRadicacion"] = df_original.at[i, "FechaRadicacion"]
-
-            if st.button("💾 Guardar cambios"):
-                if advertencias:
-                    for advert in advertencias:
-                        st.warning(advert)
-                success = save_data(edited_df)
-                if success:
-                    st.success("✅ Cambios guardados correctamente.")
-                    st.cache_data.clear()
-                    st.rerun()
         else:
-            st.warning("No hay datos para mostrar.")
+            st.warning("No hay datos para mostrar en el dashboard.")
 
     with tab2:
         st.subheader("Kanban (en desarrollo)")
@@ -145,6 +144,8 @@ def main_app():
         st.subheader("Control de entregas (en desarrollo)")
     with tab4:
         st.subheader("Generar reportes (en desarrollo)")
+    with tab5:
+        st.subheader("Edición de inventario (módulo independiente)")
 
 if "autenticado" not in st.session_state:
     login()
