@@ -110,16 +110,27 @@ def main_app():
                 key="editor"
             )
 
+            advertencias = []
+
             for i in edited_df.index:
                 if i in df_original.index:
-                    # Controlar fecha de movimiento
-                    if edited_df.at[i, "Estado"] != df_original.at[i, "Estado"]:
+                    estado_anterior = df_original.at[i, "Estado"]
+                    estado_actual = edited_df.at[i, "Estado"]
+
+                    # Actualizar FechaMovimiento si cambió el estado
+                    if estado_actual != estado_anterior:
                         edited_df.at[i, "FechaMovimiento"] = pd.Timestamp.now()
-                    # Si Estado ≠ Radicada, se revierte FechaRadicacion
-                    if edited_df.at[i, "Estado"] != "Radicada":
-                        edited_df.at[i, "FechaRadicacion"] = df_original.at[i, "FechaRadicacion"]
+
+                    # Revertir FechaRadicacion si no es Radicada
+                    if estado_actual != "Radicada":
+                        if pd.notnull(edited_df.at[i, "FechaRadicacion"]) and edited_df.at[i, "FechaRadicacion"] != df_original.at[i, "FechaRadicacion"]:
+                            advertencias.append(f"🔒 Fila {i + 2}: Solo puedes cambiar la Fecha de Radicación si el estado es 'Radicada'.")
+                            edited_df.at[i, "FechaRadicacion"] = df_original.at[i, "FechaRadicacion"]
 
             if st.button("💾 Guardar cambios"):
+                if advertencias:
+                    for advert in advertencias:
+                        st.warning(advert)
                 success = save_data(edited_df)
                 if success:
                     st.success("✅ Cambios guardados correctamente.")
