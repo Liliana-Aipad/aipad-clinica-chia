@@ -3,19 +3,12 @@ import streamlit as st
 import pandas as pd
 import os
 import plotly.express as px
-from io import BytesIO
-
-
-
-
-from openpyxl import Workbook
+from datetime import datetime
 
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
 USUARIOS_FILE = "usuarios.xlsx"
-BACKUP_DIR = "backups"
-os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# Configurar colores por estado
+# Colores por estado
 estado_colores = {
     "Radicada": "green",
     "Pendiente": "red",
@@ -31,30 +24,8 @@ def load_data():
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
-def export_pdf(resumen):
-    return None
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    elements = [Paragraph("Resumen Gerencial - Dashboard AIPAD", styles["Title"]), Spacer(1, 12)]
-
-    table_data = [resumen.columns.tolist()] + resumen.values.tolist()
-    table = Table(table_data)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-        ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
-        ("GRID", (0, 0), (-1, -1), 1, colors.black),
-    ]))
-    elements.append(table)
-    elements.append(Spacer(1, 24))
-    elements.append(Paragraph("Este reporte contiene las métricas clave del avance del proyecto.", styles["Normal"]))
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
+    else:
+        return pd.DataFrame()
 
 def login():
     st.sidebar.title("🔐 Ingreso")
@@ -71,6 +42,7 @@ def login():
                 st.session_state["autenticado"] = True
                 st.session_state["usuario"] = usuario.iloc[0]["Cedula"]
                 st.session_state["rol"] = usuario.iloc[0]["Rol"]
+            else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
@@ -83,98 +55,33 @@ def main_app():
 
     df = load_data()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📋 Dashboard", "📌 Kanban", "📁 Entregas", "📄 Reportes", "📝 Inventario"
-    ])
+    tab1, tab2, tab3 = st.tabs(["📋 Dashboard", "📌 Kanban", "📝 Inventario"])
 
     with tab1:
         st.subheader("📈 Avance general del proyecto")
-        if not df.empty:
+        total = len(df)
+        radicadas = len(df[df["Estado"] == "Radicada"])
+        total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
+        avance = round((radicadas / total) * 100, 2) if total else 0
 
-                estado_sel = colf1.multiselect("Estado", sorted(estados), default=sorted(estados))
-                eps_sel = colf2.multiselect("EPS", sorted(eps_lista), default=sorted(eps_lista))
-                fecha_min = fechas.min() if not fechas.empty else None
-                fecha_max = fechas.max() if not fechas.empty else None
-                fecha_rango = colf3.date_input("Rango de fechas", (fecha_min, fecha_max))
+        col1, col2, col3 = st.columns(3)
+        col1.metric("📦 Total facturas", total)
+        col2.metric("💰 Valor total", f"${total_valor:,.0f}")
+        col3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-                if fecha_rango and len(fecha_rango) == 2:
-                    desde, hasta = pd.to_datetime(fecha_rango[0]), pd.to_datetime(fecha_rango[1])
-                    df = df[(df["Estado"].isin(estado_sel)) &
-                            (df["EPS"].isin(eps_sel)) &
-                            (df["FechaRadicacion"] >= desde) &
-                            (df["FechaRadicacion"] <= hasta)]
+        fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
+                            color="Estado", color_discrete_map=estado_colores)
+        st.plotly_chart(fig_estado, use_container_width=True)
 
-                total = len(df)
-                radicadas = df[df["Estado"] == "Radicada"]
-                total_valor = df["Valor"].sum() if "Valor" in df.columns else 0
-                avance = round(len(radicadas) / total * 100, 2) if total else 0
+    with tab2:
+        st.subheader("📌 Kanban")
+        st.warning("Módulo en desarrollo.")
 
-                resumen_df = pd.DataFrame({
-                    "Métrica": ["Total facturas", "Valor total", "Avance (%)"],
-                    "Valor": [total, f"${total_valor:,.0f}", f"{avance}%"]
-                })
+    with tab3:
+        st.subheader("📝 Inventario")
+        st.dataframe(df, use_container_width=True)
 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("📦 Total facturas", total)
-                col2.metric("💰 Valor total", f"${total_valor:,.0f}")
-                col3.metric("📊 Avance (radicadas)", f"{avance}%")
-
-                colex = st.container()
-                    # pdf_data = export_pdf(resumen_df)
-                    # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
-
-                st.markdown("---")
-
-                fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
-                                    color="Estado", color_discrete_map=estado_colores)
-                st.plotly_chart(fig_estado, use_container_width=True)
-
-                st.markdown("## 🏥 Por EPS")
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
-                                           title="Valor total por EPS", text_auto=".2s", color_discrete_map=estado_colores)
-                    fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
-                    st.plotly_chart(fig_valor_eps, use_container_width=True)
-                with col2:
-                    fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS",
-                                           color="Estado", barmode="group", text_auto=True, color_discrete_map=estado_colores)
-                    fig_count_eps.update_layout(xaxis={'categoryorder': 'total descending'})
-                    st.plotly_chart(fig_count_eps, use_container_width=True)
-
-                st.markdown("## 📅 Por Mes")
-                if "Mes" in df.columns:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes",
-                                                color="Estado", line_group="Estado", color_discrete_map=estado_colores)
-                        st.plotly_chart(fig_valor_mes, use_container_width=True)
-                    with col2:
-                        fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado",
-                                               barmode="stack", text_auto=True, color_discrete_map=estado_colores)
-                        st.plotly_chart(fig_count_mes, use_container_width=True)
-
-                st.markdown("## 📆 Por Vigencia")
-                if "Vigencia" in df.columns:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado",
-                                               barmode="group", title="Valor por Vigencia",
-                                               text_auto=".2s", color_discrete_map=estado_colores)
-                        st.plotly_chart(fig_valor_vig, use_container_width=True)
-                    with col2:
-                        fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
-                        st.plotly_chart(fig_count_vig, use_container_width=True)
-        with tab2:
-            st.subheader("Kanban (en desarrollo)")
-        with tab3:
-            st.subheader("Control de entregas (en desarrollo)")
-        with tab4:
-            st.subheader("Generar reportes (en desarrollo)")
-        with tab5:
-            st.subheader("Edición de inventario (módulo independiente)")
-
-    if "autenticado" not in st.session_state:
-        login()
-    if st.session_state.get("autenticado", False):
-        main_app()
+if "autenticado" not in st.session_state:
+    login()
+elif st.session_state.get("autenticado"):
+    main_app()
