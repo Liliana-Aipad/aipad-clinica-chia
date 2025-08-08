@@ -141,9 +141,9 @@ def main_app():
                 colex = st.container()
                     # pdf_data = export_pdf(resumen_df)
                     # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
-            st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     excel_data = export_excel(df, resumen_df)
-                    st.download_button("📊 Descargar resumen Excel", excel_data, file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
                 st.markdown("---")
 
