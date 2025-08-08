@@ -15,21 +15,18 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 def load_data():
     if os.path.exists(INVENTARIO_FILE):
         df = pd.read_excel(INVENTARIO_FILE)
+        for col in ["FechaRadicacion", "FechaMovimiento"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
     else:
         return pd.DataFrame()
 
 def save_data(df):
     try:
-        # Convertir columnas de fecha correctamente
         if "FechaRadicacion" in df.columns:
-            df["FechaRadicacion"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce")
-            df["Mes"] = df["FechaRadicacion"].dt.strftime("%B").fillna("")
+            df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.strftime("%B").fillna("")
             df["Mes"] = df["Mes"].str.capitalize()
-
-        if "FechaMovimiento" in df.columns:
-            df["FechaMovimiento"] = pd.to_datetime(df["FechaMovimiento"], errors="coerce")
-
         df.to_excel(INVENTARIO_FILE, index=False)
         now = datetime.now().strftime("%Y-%m-%d_%H-%M")
         backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
@@ -98,21 +95,37 @@ def main_app():
             df["Estado"] = df["Estado"].astype(str)
             df["Estado"] = df["Estado"].apply(lambda x: x if x in estados_opciones else "Pendiente")
 
+            df_original = df.copy()
+
+            # Generar columnas editables condicionalmente
+            column_config = {
+                "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
+                "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD", disabled=True),
+            }
+
+            for i in df.index:
+                editable = df.at[i, "Estado"] == "Radicada"
+                if "FechaRadicacion" in df.columns:
+                    column_config[f"FechaRadicacion"] = st.column_config.DateColumn(
+                        "Fecha de Radicación", format="YYYY-MM-DD", disabled=not editable
+                    )
+
             edited_df = st.data_editor(
                 df,
                 num_rows="dynamic",
                 use_container_width=True,
-                column_config={
-                    "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
-                    "FechaRadicacion": st.column_config.DateColumn("Fecha de Radicación", format="YYYY-MM-DD"),
-                    "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD"),
-                },
+                column_config=column_config,
                 key="editor"
             )
+
+            for i in edited_df.index:
+                if i in df_original.index and edited_df.at[i, "Estado"] != df_original.at[i, "Estado"]:
+                    edited_df.at[i, "FechaMovimiento"] = pd.Timestamp.now()
+
             if st.button("💾 Guardar cambios"):
                 success = save_data(edited_df)
                 if success:
-                    st.success("✅ Cambios guardados, respaldo creado y mes recalculado.")
+                    st.success("✅ Cambios guardados correctamente.")
                     st.cache_data.clear()
                     st.rerun()
         else:
