@@ -1,5 +1,5 @@
 
-APP_VERSION = "2025-08-08 19:05"
+APP_VERSION = "2025-08-08 19:45"
 import streamlit as st
 import pandas as pd
 import os
@@ -42,6 +42,14 @@ def registro_por_factura(df: pd.DataFrame, numero_factura: str):
         idx = df[mask].index[0]
         return True, idx, df.loc[idx]
     return False, None, None
+
+def siguiente_id(df: pd.DataFrame):
+    """Calcula el siguiente ID numérico disponible. Si no hay, inicia en 1."""
+    if "ID" not in df.columns or df["ID"].dropna().empty:
+        return 1
+    # Intentar convertir a numérico
+    s = pd.to_numeric(df["ID"], errors="coerce").dropna()
+    return int(s.max()) + 1 if not s.empty else 1
 
 # ====== DATA ======
 @st.cache_data
@@ -253,7 +261,7 @@ def main_app():
                 }
             else:
                 def_val = {
-                    "ID": "",
+                    "ID": "",  # se autoasigna
                     "NumeroFactura": numero_activo,
                     "Valor": 0.0,
                     "EPS": "",
@@ -273,7 +281,8 @@ def main_app():
             with st.form("form_factura", clear_on_submit=False):
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    id_val = st.text_input("ID", value=def_val["ID"])
+                    # ID bloqueado SIEMPRE. Si es nuevo y queda vacío, se autogenera al guardar.
+                    st.text_input("ID (automático)", value=def_val["ID"], disabled=True)
                     num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
                     valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
                 with c2:
@@ -282,25 +291,36 @@ def main_app():
                     vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(def_val["Vigencia"]) if def_val["Vigencia"] in vig_set else 0)
                     est_val = st.selectbox("Estado", options=estados_opciones, index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0)
                 with c3:
+                    # Fecha de Radicación: solo habilitada si Estado = Radicada
                     frad_disabled = (est_val != "Radicada")
                     frad_val = st.date_input(
                         "Fecha de Radicación",
                         value=def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today(),
                         disabled=frad_disabled
                     )
-                    fmov_val = def_val["FechaMovimiento"]  # se recalcula al guardar
-                    mes_val = def_val["Mes"]               # se recalcula desde FechaRadicacion
+                    # FechaMovimiento bloqueada (solo se actualiza automáticamente cuando cambia el Estado)
+                    st.text_input(
+                        "Fecha de Movimiento (automática)",
+                        value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
+                        disabled=True
+                    )
                 obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
 
                 submit = st.form_submit_button("💾 Guardar cambios", type="primary")
 
             if submit:
                 ahora = pd.Timestamp(datetime.now())
+                # Radicación: solo si estado es Radicada; en otro caso se limpia
                 frad_ts = _to_ts(frad_val) if est_val == "Radicada" else pd.NaT
                 mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
 
+                # Armar fila nueva (ID se autogenera si viene vacío)
+                new_id = def_val["ID"]
+                if not new_id:  # si está vacío o no existe
+                    new_id = siguiente_id(df) if not existe else def_val["ID"]
+
                 nueva = {
-                    "ID": id_val,
+                    "ID": new_id,
                     "NumeroFactura": str(num_val).strip(),
                     "Valor": float(valor_val),
                     "EPS": eps_val.strip(),
@@ -311,31 +331,18 @@ def main_app():
                     "Mes": mes_calc
                 }
 
-                # Detectar cambios simples y definir FechaMovimiento
-                hubo_cambio = True
-                if existe:
-                    orig = df.loc[idx, ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","FechaRadicacion","Observaciones","Mes"]].copy()
-                    try:
-                        hubo_cambio = any([
-                            str(nueva["ID"]) != str(orig["ID"]),
-                            str(nueva["NumeroFactura"]) != str(orig["NumeroFactura"]),
-                            float(nueva["Valor"]) != float(orig["Valor"]) if pd.notna(orig["Valor"]) else True,
-                            str(nueva["EPS"]) != str(orig["EPS"]),
-                            str(nueva["Vigencia"]) != str(orig["Vigencia"]),
-                            str(nueva["Estado"]) != str(orig["Estado"]),
-                            (pd.isna(nueva["FechaRadicacion"]) != pd.isna(orig["FechaRadicacion"])) or
-                                (pd.notna(nueva["FechaRadicacion"]) and pd.notna(orig["FechaRadicacion"]) and pd.Timestamp(nueva["FechaRadicacion"].date()) != pd.Timestamp(orig["FechaRadicacion"].date())),
-                            str(nueva["Observaciones"]) != str(orig["Observaciones"]),
-                            str(nueva["Mes"]) != str(orig["Mes"]),
-                        ])
-                    except Exception:
-                        hubo_cambio = True
+                # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
+                estado_anterior = str(fila.get("Estado","")) if existe else ""
+                estado_cambio = (str(est_val) != estado_anterior) or (not existe)
 
-                nueva["FechaMovimiento"] = ahora if hubo_cambio else (df.loc[idx, "FechaMovimiento"] if existe else ahora)
+                if existe:
+                    nueva["FechaMovimiento"] = (ahora if estado_cambio else fila.get("FechaMovimiento", pd.NaT))
+                else:
+                    nueva["FechaMovimiento"] = ahora
 
                 # Insertar/actualizar
                 if existe:
-                    for k,v in nueva.items():
+                    for k, v in nueva.items():
                         df.at[idx, k] = v
                 else:
                     df = pd.concat([df, pd.DataFrame([nueva])], ignore_index=True)
