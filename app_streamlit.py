@@ -1,8 +1,8 @@
 # app_streamlit.py
-APP_VERSION = "2025-08-08 21:05"
+APP_VERSION = "2025-08-08 22:10"
 
 import streamlit as st
-st.set_page_config(layout="wide")  # Debe ser el primer comando de Streamlit
+st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
 
 import pandas as pd
 import os, re
@@ -100,7 +100,7 @@ def _select_tab(label: str):
 @st.cache_data
 def load_data():
     if not os.path.exists(INVENTARIO_FILE):
-        # Si no existe, crear estructura vacía para evitar errores
+        # Estructura vacía si no existe
         cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
                 "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
         return pd.DataFrame(columns=cols)
@@ -149,15 +149,35 @@ def login():
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
 
-# ====== Kanban Helpers ======
-def mover_estado(df: pd.DataFrame, idx: int, nuevo_estado: str):
+# ====== Bandejas Helpers ======
+def filtrar_por_estado(df: pd.DataFrame, estado: str, eps: str, vigencia, q: str):
+    sub = df[df["Estado"] == estado].copy()
+    if eps and eps != "Todos":
+        sub = sub[sub["EPS"].astype(str) == eps]
+    if vigencia and vigencia != "Todos":
+        sub = sub[sub["Vigencia"].astype(str) == str(vigencia)]
+    if q:
+        qn = str(q).strip().lower()
+        sub = sub[sub["NumeroFactura"].astype(str).str.lower().str.contains(qn)]
+    return sub
+
+def paginar(df: pd.DataFrame, page: int, per_page: int):
+    total = len(df)
+    total_pages = max((total - 1) // per_page + 1, 1)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    return df.iloc[start:end], total_pages, page
+
+def aplicar_movimiento_masivo(df: pd.DataFrame, indices, nuevo_estado: str):
     ahora = pd.Timestamp(datetime.now())
-    df.at[idx, "Estado"] = nuevo_estado
-    # Si pasa a Radicada y no tiene FechaRadicacion, habilitarla hoy por defecto
-    if nuevo_estado == "Radicada" and pd.isna(df.at[idx, "FechaRadicacion"]):
-        df.at[idx, "FechaRadicacion"] = ahora.normalize()
-        df.at[idx, "Mes"] = MES_NOMBRE.get(int(ahora.month), "")
-    df.at[idx, "FechaMovimiento"] = ahora
+    for idx in indices:
+        df.at[idx, "Estado"] = nuevo_estado
+        if nuevo_estado == "Radicada" and pd.isna(df.at[idx, "FechaRadicacion"]):
+            # Si no tiene fecha, la definimos "hoy"
+            df.at[idx, "FechaRadicacion"] = ahora.normalize()
+            df.at[idx, "Mes"] = MES_NOMBRE.get(int(ahora.month), "")
+        df.at[idx, "FechaMovimiento"] = ahora
     guardar_inventario(df)
 
 # ====== APP ======
@@ -176,12 +196,12 @@ def main_app():
 
     df = load_data()
 
-    tab_labels = ["📋 Dashboard", "📌 Kanban", "📝 Gestión"]
+    tab_labels = ["📋 Dashboard", "🗂️ Bandejas", "📝 Gestión"]
     tab1, tab2, tab3 = st.tabs(tab_labels)
 
-    # Si hay query param ?tab=kanban o ?tab=gestion, forzar selección
-    if qp.get("tab", [""])[0] == "kanban":
-        _select_tab("📌 Kanban")
+    # Si hay query param ?tab=bandejas o ?tab=gestion, forzar selección
+    if qp.get("tab", [""])[0] == "bandejas":
+        _select_tab("🗂️ Bandejas")
     elif qp.get("tab", [""])[0] == "gestion":
         _select_tab("📝 Gestión")
 
@@ -283,40 +303,91 @@ def main_app():
                     )
                     st.plotly_chart(fig_vig_pie, use_container_width=True)
 
-    # ---- KANBAN ----
+    # ---- BANDEJAS (por estado, con filtros y paginación) ----
     with tab2:
-        st.subheader("📌 Kanban")
+        st.subheader("🗂️ Bandejas por estado")
+
         if df.empty:
             st.info("No hay datos para mostrar.")
         else:
-            cols = st.columns(4)
-            estado_to_col = dict(zip(ESTADOS, cols))
-            for estado, col in estado_to_col.items():
-                with col:
-                    st.markdown(f"### {estado}")
-                    subdf = df[df["Estado"] == estado].copy()
-                    if subdf.empty:
-                        st.caption("— sin facturas —")
-                    else:
-                        for i, (idx, row) in enumerate(subdf.sort_values(by=["FechaMovimiento","NumeroFactura"], ascending=[False, True]).iterrows(), start=1):
-                            with st.container(border=True):
-                                st.markdown(f"**{row.get('NumeroFactura','')}**")
-                                st.caption(f"ID: {row.get('ID','')} • EPS: {row.get('EPS','')} • Vigencia: {row.get('Vigencia','')}")
-                                st.caption(f"Valor: ${float(row.get('Valor',0) or 0):,.0f}")
-                                c1, c2 = st.columns([2,1])
-                                with c1:
-                                    nuevo = st.selectbox(
-                                        "Mover a:",
-                                        options=[estado] + [e for e in ESTADOS if e != estado],
-                                        index=0,
-                                        key=f"mv_{idx}"
-                                    )
-                                with c2:
-                                    if st.button("Aplicar", key=f"btn_mv_{idx}"):
-                                        mover_estado(df, idx, nuevo)
-                                        st.success(f"Factura {row.get('NumeroFactura','')} → {nuevo}")
-                                        _set_query_params(tab="kanban")
-                                        st.rerun()
+            # Filtros globales de bandeja
+            fc1, fc2, fc3, fc4 = st.columns([1.2,1,1,1])
+            with fc1:
+                q = st.text_input("🔎 Buscar factura (contiene)", key="bandeja_q")
+            with fc2:
+                eps_opts = ["Todos"] + sorted([e for e in df["EPS"].dropna().astype(str).unique().tolist() if e])
+                eps_sel = st.selectbox("EPS", eps_opts, index=0, key="bandeja_eps")
+            with fc3:
+                vig_opts = ["Todos"] + sorted([str(int(v)) for v in pd.to_numeric(df["Vigencia"], errors="coerce").dropna().unique().tolist()])
+                vig_sel = st.selectbox("Vigencia", vig_opts, index=0, key="bandeja_vig")
+            with fc4:
+                per_page = st.selectbox("Filas por página", [50, 100, 200], index=1, key="bandeja_pp")
+
+            # Pestañas internas por estado
+            tabs_estado = st.tabs(ESTADOS)
+
+            for estado, tab in zip(ESTADOS, tabs_estado):
+                with tab:
+                    sub = filtrar_por_estado(df, estado, eps_sel, vig_sel, q)
+                    sub = sub.sort_values(by=["FechaMovimiento","NumeroFactura"], ascending=[False, True])
+
+                    # Estado de paginación en session_state
+                    pg_key = f"page_{estado}"
+                    if pg_key not in st.session_state:
+                        st.session_state[pg_key] = 1
+
+                    # Barra de paginación
+                    sub_page, total_pages, current_page = paginar(sub, st.session_state[pg_key], per_page)
+                    st.session_state[pg_key] = current_page  # normaliza rango
+
+                    cpa, cpb, cpc = st.columns([1,2,1])
+                    with cpa:
+                        prev = st.button("⬅️ Anterior", key=f"prev_{estado}", disabled=(current_page<=1))
+                    with cpc:
+                        nextb = st.button("Siguiente ➡️", key=f"next_{estado}", disabled=(current_page>=total_pages))
+                    with cpb:
+                        st.markdown(f"**Página {current_page} / {total_pages}** &nbsp; &nbsp; (**{len(sub)}** registros)")
+
+                    if prev:
+                        st.session_state[pg_key] = max(1, current_page-1)
+                        st.rerun()
+                    if nextb:
+                        st.session_state[pg_key] = min(total_pages, current_page+1)
+                        st.rerun()
+
+                    # Selección por fila en la página
+                    st.divider()
+                    sel_all_key = f"sel_all_{estado}_{current_page}"
+                    sel_all = st.checkbox("Seleccionar todo (esta página)", key=sel_all_key, value=False)
+
+                    # Tabla simplificada
+                    cols_mostrar = ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"]
+                    view = sub_page[cols_mostrar].copy()
+
+                    # Agregar checkbox por fila (máx per_page)
+                    seleccionados = []
+                    for ridx, (orig_idx, row) in enumerate(view.iterrows()):
+                        ck_key = f"sel_{estado}_{current_page}_{int(ridx)}_{int(orig_idx)}"
+                        default_val = st.session_state.get(sel_all_key, False)
+                        val = st.checkbox(f"Seleccionar — ID {row['ID']} • Factura {row['NumeroFactura']} • EPS {row['EPS']} • Vig {row['Vigencia']}", key=ck_key, value=default_val)
+                        if val:
+                            seleccionados.append(orig_idx)
+
+                    # Mostrar dataframe (solo lectura) para contexto
+                    st.dataframe(view, use_container_width=True, hide_index=True)
+
+                    st.divider()
+                    c1, c2 = st.columns([2,1])
+                    with c1:
+                        nuevo_estado = st.selectbox("Mover seleccionadas a:", [e for e in ESTADOS if e != estado], key=f"move_to_{estado}")
+                    with c2:
+                        mover = st.button("Aplicar movimiento", type="primary", key=f"aplicar_{estado}", disabled=(len(seleccionados)==0))
+
+                    if mover:
+                        aplicar_movimiento_masivo(df, seleccionados, nuevo_estado)
+                        st.success(f"Se movieron {len(seleccionados)} facturas de {estado} → {nuevo_estado}")
+                        _set_query_params(tab="bandejas")
+                        st.rerun()
 
     # ---- GESTIÓN (Formulario) ----
     with tab3:
