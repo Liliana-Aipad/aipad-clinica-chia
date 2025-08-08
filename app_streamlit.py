@@ -69,37 +69,45 @@ def main_app():
 
             st.markdown("---")
 
-            # Distribución por Estado (Pastel)
             fig_estado = px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado")
             st.plotly_chart(fig_estado, use_container_width=True)
 
             st.markdown("## 🏥 Por EPS")
             col1, col2 = st.columns(2)
             with col1:
-                fig_valor_eps = px.treemap(df, path=["EPS"], values="Valor", title="Valor por EPS (Treemap)")
-                st.plotly_chart(fig_valor_eps, use_container_width=True)
+                if "Valor" in df.columns:
+                    fig_valor_eps = px.bar(df, x="EPS", y="Valor", color="Estado",
+                                           barmode="group", title="Valor total por EPS",
+                                           text_auto=".2s")
+                    fig_valor_eps.update_layout(xaxis={'categoryorder': 'total descending'})
+                    st.plotly_chart(fig_valor_eps, use_container_width=True)
             with col2:
-                fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS", color="Estado", barmode="group")
+                fig_count_eps = px.bar(df, x="EPS", title="Número de facturas por EPS",
+                                       color="Estado", barmode="group", text_auto=True)
+                fig_count_eps.update_layout(xaxis={'categoryorder': 'total descending'})
                 st.plotly_chart(fig_count_eps, use_container_width=True)
 
             st.markdown("## 📅 Por Mes")
             if "Mes" in df.columns:
                 col1, col2 = st.columns(2)
                 with col1:
-                    fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes", color="Estado", line_group="Estado")
+                    fig_valor_mes = px.area(df, x="Mes", y="Valor", title="Valor total por Mes",
+                                            color="Estado", line_group="Estado")
                     st.plotly_chart(fig_valor_mes, use_container_width=True)
                 with col2:
-                    fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado", barmode="stack")
+                    fig_count_mes = px.bar(df, x="Mes", title="Facturas por Mes", color="Estado",
+                                           barmode="stack", text_auto=True)
                     st.plotly_chart(fig_count_mes, use_container_width=True)
 
             st.markdown("## 📆 Por Vigencia")
             if "Vigencia" in df.columns:
                 col1, col2 = st.columns(2)
                 with col1:
-                    fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado", barmode="group", title="Valor por Vigencia")
+                    fig_valor_vig = px.bar(df, x="Vigencia", y="Valor", color="Estado",
+                                           barmode="group", title="Valor por Vigencia", text_auto=".2s")
                     st.plotly_chart(fig_valor_vig, use_container_width=True)
                 with col2:
-                    fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia")
+                    fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
                     st.plotly_chart(fig_count_vig, use_container_width=True)
 
         else:
