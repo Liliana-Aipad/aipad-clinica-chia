@@ -21,10 +21,15 @@ def load_data():
 
 def save_data(df):
     try:
-        # Calcular automáticamente el campo "Mes" a partir de "FechaRadicacion"
+        # Convertir columnas de fecha correctamente
         if "FechaRadicacion" in df.columns:
-            df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.strftime('%B').fillna("")
+            df["FechaRadicacion"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce")
+            df["Mes"] = df["FechaRadicacion"].dt.strftime("%B").fillna("")
             df["Mes"] = df["Mes"].str.capitalize()
+
+        if "FechaMovimiento" in df.columns:
+            df["FechaMovimiento"] = pd.to_datetime(df["FechaMovimiento"], errors="coerce")
+
         df.to_excel(INVENTARIO_FILE, index=False)
         now = datetime.now().strftime("%Y-%m-%d_%H-%M")
         backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
@@ -107,7 +112,7 @@ def main_app():
             if st.button("💾 Guardar cambios"):
                 success = save_data(edited_df)
                 if success:
-                    st.success("✅ Cambios guardados, respaldo creado y mes calculado automáticamente.")
+                    st.success("✅ Cambios guardados, respaldo creado y mes recalculado.")
                     st.cache_data.clear()
                     st.rerun()
         else:
