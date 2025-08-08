@@ -74,7 +74,7 @@ def login():
                 st.session_state["autenticado"] = True
                 st.session_state["usuario"] = usuario.iloc[0]["Cedula"]
                 st.session_state["rol"] = usuario.iloc[0]["Rol"]
-            else:
+    else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
@@ -169,7 +169,7 @@ def main_app():
                     with col2:
                         fig_count_vig = px.pie(df, names="Vigencia", title="Distribución de Facturas por Vigencia", hole=0.4)
                         st.plotly_chart(fig_count_vig, use_container_width=True)
-            else:
+    else:
                 st.warning("No hay datos para mostrar en el dashboard.")
 
         with tab2:
