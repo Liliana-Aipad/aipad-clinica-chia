@@ -110,13 +110,6 @@ def main_app():
         st.subheader("📈 Avance general del proyecto")
         if not df.empty:
 
-            st.markdown("### 🔍 Filtros")
-            with st.expander("Filtrar datos", expanded=False):
-                colf1, colf2, colf3 = st.columns(3)
-                estados = df["Estado"].dropna().unique().tolist()
-                eps_lista = df["EPS"].dropna().unique().tolist()
-                fechas = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dropna()
-
                 estado_sel = colf1.multiselect("Estado", sorted(estados), default=sorted(estados))
                 eps_sel = colf2.multiselect("EPS", sorted(eps_lista), default=sorted(eps_lista))
                 fecha_min = fechas.min() if not fechas.empty else None
@@ -146,7 +139,6 @@ def main_app():
                 col3.metric("📊 Avance (radicadas)", f"{avance}%")
 
                 colex = st.container()
-                with colpdf:
                     # pdf_data = export_pdf(resumen_df)
                     # st.download_button(...) (PDF eliminado) file_name="dashboard_resumen.pdf", mime="application/pdf")
             st.download_button("📊 Descargar resumen Excel", export_excel(df, resumen_df), file_name="dashboard_resumen.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -211,4 +203,3 @@ def main_app():
         login()
     if st.session_state.get("autenticado", False):
         main_app()
-
