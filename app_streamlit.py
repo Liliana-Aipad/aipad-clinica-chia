@@ -20,10 +20,15 @@ def load_data():
         return pd.DataFrame()
 
 def save_data(df):
-    df.to_excel(INVENTARIO_FILE, index=False)
-    now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
-    df.to_excel(backup_file, index=False)
+    try:
+        df.to_excel(INVENTARIO_FILE, index=False)
+        now = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        backup_file = f"{BACKUP_DIR}/inventario_backup_{now}.xlsx"
+        df.to_excel(backup_file, index=False)
+        return True
+    except Exception as e:
+        st.error(f"❌ Error al guardar el archivo: {e}")
+        return False
 
 def login():
     st.sidebar.title("🔐 Ingreso")
@@ -87,8 +92,9 @@ def main_app():
                 key="editor"
             )
             if st.button("💾 Guardar cambios"):
-                save_data(edited_df)
-                st.success("Inventario actualizado y respaldo creado.")
+                success = save_data(edited_df)
+                if success:
+                    st.success("✅ Cambios guardados y respaldo creado.")
         else:
             st.warning("No hay datos para mostrar.")
 
