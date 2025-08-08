@@ -211,3 +211,4 @@ def main_app():
         login()
     if st.session_state.get("autenticado", False):
         main_app()
+
