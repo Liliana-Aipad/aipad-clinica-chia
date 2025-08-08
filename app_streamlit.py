@@ -57,6 +57,7 @@ def login():
             st.sidebar.error(f"Error cargando usuarios: {e}")
 
 def main_app():
+    st.set_page_config(layout="wide")
     st.title("📊 AIPAD Control de Radicación")
     st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`")
     st.markdown(f"🔐 Rol: `{st.session_state['rol']}`")
@@ -97,30 +98,26 @@ def main_app():
 
             df_original = df.copy()
 
-            # Generar columnas editables condicionalmente
-            column_config = {
-                "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
-                "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD", disabled=True),
-            }
-
-            for i in df.index:
-                editable = df.at[i, "Estado"] == "Radicada"
-                if "FechaRadicacion" in df.columns:
-                    column_config[f"FechaRadicacion"] = st.column_config.DateColumn(
-                        "Fecha de Radicación", format="YYYY-MM-DD", disabled=not editable
-                    )
-
             edited_df = st.data_editor(
                 df,
                 num_rows="dynamic",
                 use_container_width=True,
-                column_config=column_config,
+                column_config={
+                    "Estado": st.column_config.SelectboxColumn("Estado", options=estados_opciones),
+                    "FechaRadicacion": st.column_config.DateColumn("Fecha de Radicación", format="YYYY-MM-DD"),
+                    "FechaMovimiento": st.column_config.DateColumn("Fecha de Movimiento", format="YYYY-MM-DD", disabled=True),
+                },
                 key="editor"
             )
 
             for i in edited_df.index:
-                if i in df_original.index and edited_df.at[i, "Estado"] != df_original.at[i, "Estado"]:
-                    edited_df.at[i, "FechaMovimiento"] = pd.Timestamp.now()
+                if i in df_original.index:
+                    # Controlar fecha de movimiento
+                    if edited_df.at[i, "Estado"] != df_original.at[i, "Estado"]:
+                        edited_df.at[i, "FechaMovimiento"] = pd.Timestamp.now()
+                    # Si Estado ≠ Radicada, se revierte FechaRadicacion
+                    if edited_df.at[i, "Estado"] != "Radicada":
+                        edited_df.at[i, "FechaRadicacion"] = df_original.at[i, "FechaRadicacion"]
 
             if st.button("💾 Guardar cambios"):
                 success = save_data(edited_df)
