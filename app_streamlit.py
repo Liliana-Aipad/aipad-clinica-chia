@@ -73,6 +73,47 @@ def main_app():
                             color="Estado", color_discrete_map=estado_colores)
         st.plotly_chart(fig_estado, use_container_width=True)
 
+# Gráfico por EPS
+if "EPS" in df.columns:
+    st.subheader("📊 Facturación por EPS")
+    resumen_eps = df.groupby("EPS").agg({
+        "Factura": "count",
+        "Valor": "sum",
+        "Estado": lambda x: (x == "Radicada").sum()
+    }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+    resumen_eps["% Avance"] = round((resumen_eps["Radicadas"] / resumen_eps["N° Facturas"]) * 100, 2)
+    resumen_eps = resumen_eps.sort_values("N° Facturas", ascending=False)
+    fig_eps = px.bar(resumen_eps, x=resumen_eps.index, y="N° Facturas", color_discrete_sequence=["blue"],
+                     text="% Avance", title="Facturas por EPS")
+    st.plotly_chart(fig_eps, use_container_width=True)
+
+# Gráfico por Mes
+if "Mes" in df.columns:
+    st.subheader("📅 Facturación por Mes")
+    resumen_mes = df.groupby("Mes").agg({
+        "Factura": "count",
+        "Valor": "sum",
+        "Estado": lambda x: (x == "Radicada").sum()
+    }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+    resumen_mes["% Avance"] = round((resumen_mes["Radicadas"] / resumen_mes["N° Facturas"]) * 100, 2)
+    fig_mes = px.area(resumen_mes, x=resumen_mes.index, y="N° Facturas", text="% Avance",
+                      title="Facturas por Mes")
+    st.plotly_chart(fig_mes, use_container_width=True)
+
+# Gráfico por Vigencia
+if "Vigencia" in df.columns:
+    st.subheader("📅 Facturación por Vigencia")
+    resumen_vigencia = df.groupby("Vigencia").agg({
+        "Factura": "count",
+        "Valor": "sum",
+        "Estado": lambda x: (x == "Radicada").sum()
+    }).rename(columns={"Factura": "N° Facturas", "Valor": "Valor Total", "Estado": "Radicadas"})
+    resumen_vigencia["% Avance"] = round((resumen_vigencia["Radicadas"] / resumen_vigencia["N° Facturas"]) * 100, 2)
+    fig_vigencia = px.bar(resumen_vigencia, x=resumen_vigencia.index, y="N° Facturas",
+                          text="% Avance", title="Facturas por Vigencia")
+    st.plotly_chart(fig_vigencia, use_container_width=True)
+
+
     with tab2:
         st.subheader("📌 Kanban")
         st.warning("Módulo en desarrollo.")
