@@ -5,3 +5,4 @@ openpyxl
 openpyxl
 reportlab
 kaleido
+requests
