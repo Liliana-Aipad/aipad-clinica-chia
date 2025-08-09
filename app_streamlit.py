@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 12:05 • Sheets"
+APP_VERSION = "2025-08-09 12:40 • Sheets + Drive scope"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
-import io, os, re, time
+import io, os, re
 import streamlit.components.v1 as components
 
 # ===== Google Sheets =====
@@ -50,10 +50,15 @@ def _select_tab(label: str):
 
 # ===== Google Sheets helpers =====
 def _open_worksheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    # ⬅️ Opción A: añadir scope de Drive para poder abrir la hoja por NOMBRE
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
     info = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     gc = gspread.authorize(creds)
+    # Abrimos por NOMBRE del Spreadsheet y worksheet definidos en secrets
     sh = gc.open(st.secrets["googlesheets"]["spreadsheet_name"])
     ws = sh.worksheet(st.secrets["googlesheets"]["worksheet_name"])
     return ws
@@ -264,7 +269,7 @@ def main_app():
                                key="dl_dashboard")
 
             with st.expander("🧪 Diagnóstico de inventario"):
-                st.caption("📄 Origen de datos: **Google Sheets**")
+                st.caption("📄 Origen de datos: **Google Sheets** (con Drive scope)")
                 st.code(f"Spreadsheet: {st.secrets['googlesheets']['spreadsheet_name']}\nWorksheet:   {st.secrets['googlesheets']['worksheet_name']}", language="bash")
                 c1, c2 = st.columns(2)
                 if c1.button("🔄 Forzar recarga desde Sheets"):
@@ -660,6 +665,7 @@ if st.session_state.get("autenticado", False):
     main_app()
 else:
     login()
+
 
 
 
