@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 09:55"
+APP_VERSION = "2025-08-09 10:40"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -218,7 +218,7 @@ def main_app():
                     color="Estado", color_discrete_map=ESTADO_COLORES
                 )
                 fig_estado.update_traces(textposition="inside", textinfo="percent+value")
-                st.plotly_chart(fig_estado, use_container_width=True)
+                st.plotly_chart(fig_estado, use_container_width=True, key="dash_estado_donut")
 
             # ---- EPS (dos gráficos en una fila) ----
             st.markdown("## 🏥 Por EPS")
@@ -232,7 +232,7 @@ def main_app():
                     fig_funnel = px.funnel(g_cnt, x="Cantidad", y="EPS", title="Cantidad y % por EPS")
                     fig_funnel.update_traces(text=g_cnt.apply(lambda r: f"{int(r['Cantidad'])} ({r['%']}%)", axis=1),
                                              textposition="inside")
-                    st.plotly_chart(fig_funnel, use_container_width=True)
+                    st.plotly_chart(fig_funnel, use_container_width=True, key="dash_eps_funnel")
                 with e2:
                     if {"Valor","Estado"}.issubset(df.columns):
                         df_rad = df_view[df_view["EstadoCanon"]=="Radicada"].copy()
@@ -242,7 +242,7 @@ def main_app():
                                              title="Valor radicado por EPS (solo Radicadas)",
                                              text_auto=".2s")
                         fig_eps_val.update_layout(xaxis={'categoryorder':'total descending'})
-                        st.plotly_chart(fig_eps_val, use_container_width=True)
+                        st.plotly_chart(fig_eps_val, use_container_width=True, key="dash_eps_val")
 
             # ---- Vigencia (dos gráficos en una fila) ----
             st.markdown("## 📆 Por Vigencia")
@@ -252,13 +252,13 @@ def main_app():
                     fig_vig_val = px.bar(df, x="Vigencia", y="Valor", color="Estado",
                                          title="Valor por Vigencia (por Estado)",
                                          barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s")
-                    st.plotly_chart(fig_vig_val, use_container_width=True)
+                    st.plotly_chart(fig_vig_val, use_container_width=True, key="dash_vig_val")
                 with v2:
                     g_vig_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
                     fig_vig_donut = px.pie(g_vig_cnt, names="Vigencia", values="Cantidad",
                                            hole=0.4, title="Distribución de Facturas por Vigencia")
                     fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
-                    st.plotly_chart(fig_vig_donut, use_container_width=True)
+                    st.plotly_chart(fig_vig_donut, use_container_width=True, key="dash_vig_donut")
 
             st.divider()
             # Descarga Excel del dashboard
@@ -286,7 +286,8 @@ def main_app():
                                data=exportar_dashboard_excel(df, df_view),
                                file_name="dashboard_radicacion.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+                               use_container_width=True,
+                               key="dl_dashboard")
 
             with st.expander("🧪 Diagnóstico de inventario"):
                 st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
@@ -512,7 +513,7 @@ def main_app():
             st.info("No hay datos para reportar.")
         else:
             # Selector de reporte
-            tipo = st.selectbox("Elige el reporte", ["Por EPS", "Por Vigencia", "Por Estado"], index=0)
+            tipo = st.selectbox("Elige el reporte", ["Por EPS", "Por Vigencia", "Por Estado"], index=0, key="rep_tipo")
 
             # Helpers de agregación
             def agg_eps(data: pd.DataFrame) -> pd.DataFrame:
@@ -555,7 +556,7 @@ def main_app():
                 tabla = agg_eps(df)
 
                 st.markdown("### 🏥 Tabla por EPS")
-                st.dataframe(tabla, use_container_width=True)
+                st.dataframe(tabla, use_container_width=True, key="tabla_por_eps")
 
                 c1, c2 = st.columns(2)
                 # Embudo: cantidad y %
@@ -572,7 +573,7 @@ def main_app():
                         text=tabla_plot.head(25).apply(lambda r: f"{int(r['Cuentas'])} ({r['%']}%)", axis=1),
                         textposition="inside"
                     )
-                    st.plotly_chart(fig_funnel, use_container_width=True)
+                    st.plotly_chart(fig_funnel, use_container_width=True, key="rep_eps_funnel")
                 # Barras: valor radicado (solo Radicadas)
                 with c2:
                     df_rad = df[df["Estado"]=="Radicada"].copy()
@@ -584,14 +585,15 @@ def main_app():
                         text_auto=".2s"
                     )
                     fig_val.update_layout(xaxis={'categoryorder':'total descending'})
-                    st.plotly_chart(fig_val, use_container_width=True)
+                    st.plotly_chart(fig_val, use_container_width=True, key="rep_eps_val")
 
                 st.download_button(
                     "⬇️ Descargar reporte EPS (Excel)",
                     data=exportar_excel(tabla, "Por_EPS"),
                     file_name="reporte_por_eps.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    use_container_width=True,
+                    key="dl_rep_eps"
                 )
 
             # ====== POR VIGENCIA ======
@@ -599,7 +601,7 @@ def main_app():
                 tabla = agg_vig(df)
 
                 st.markdown("### 📆 Tabla por Vigencia")
-                st.dataframe(tabla, use_container_width=True)
+                st.dataframe(tabla, use_container_width=True, key="tabla_por_vigencia")
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -608,7 +610,7 @@ def main_app():
                         title="Valor por Vigencia (por Estado)",
                         barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
                     )
-                    st.plotly_chart(fig_vig_val, use_container_width=True)
+                    st.plotly_chart(fig_vig_val, use_container_width=True, key="rep_vig_val")
                 with c2:
                     g_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cuentas")
                     fig_vig_donut = px.pie(
@@ -616,14 +618,15 @@ def main_app():
                         hole=0.45, title="Distribución de Cuentas por Vigencia"
                     )
                     fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
-                    st.plotly_chart(fig_vig_donut, use_container_width=True)
+                    st.plotly_chart(fig_vig_donut, use_container_width=True, key="rep_vig_donut")
 
                 st.download_button(
                     "⬇️ Descargar reporte Vigencia (Excel)",
                     data=exportar_excel(tabla, "Por_Vigencia"),
                     file_name="reporte_por_vigencia.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    use_container_width=True,
+                    key="dl_rep_vig"
                 )
 
             # ====== POR ESTADO ======
@@ -631,7 +634,7 @@ def main_app():
                 tabla = agg_estado(df)
 
                 st.markdown("### 🧩 Tabla por Estado")
-                st.dataframe(tabla, use_container_width=True)
+                st.dataframe(tabla, use_container_width=True, key="tabla_por_estado")
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -641,21 +644,22 @@ def main_app():
                         color="Estado", color_discrete_map=ESTADO_COLORES
                     )
                     fig_estado.update_traces(textposition="inside", textinfo="percent+value")
-                    st.plotly_chart(fig_estado, use_container_width=True)
+                    st.plotly_chart(fig_estado, use_container_width=True, key="rep_estado_pie")
                 with c2:
                     fig_bar = px.bar(
                         tabla, x="Estado", y="Cuentas",
                         title="Cuentas por Estado", text_auto=True,
                         color="Estado", color_discrete_map=ESTADO_COLORES
                     )
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                    st.plotly_chart(fig_bar, use_container_width=True, key="rep_estado_bar")
 
                 st.download_button(
                     "⬇️ Descargar reporte Estado (Excel)",
                     data=exportar_excel(tabla, "Por_Estado"),
                     file_name="reporte_por_estado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    use_container_width=True,
+                    key="dl_rep_estado"
                 )
 
     # ===== Avance =====
@@ -703,13 +707,13 @@ def main_app():
             comp["% real acumulado"] = (comp["Cuentas reales acumuladas"]/total_meta*100).round(2) if total_meta else 0.0
             comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - base["% proyectado acumulado"]).round(2)
 
-            st.dataframe(comp, use_container_width=True)
+            st.dataframe(comp, use_container_width=True, key="avance_tabla")
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=base["Mes"], y=base["% proyectado acumulado"], mode='lines+markers', name='Proyectado'))
             fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% real acumulado"], mode='lines+markers', name='Real'))
             fig.update_layout(title="Avance acumulado (%) — Real vs Proyectado", yaxis_title="% acumulado", xaxis_title="Mes")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="avance_lineas")
 
             k1,k2,k3 = st.columns(3)
             k1.metric("Meta total (cuentas)", f"{total_meta:,}")
@@ -721,5 +725,6 @@ if st.session_state.get("autenticado", False):
     main_app()
 else:
     login()
+
 
 
