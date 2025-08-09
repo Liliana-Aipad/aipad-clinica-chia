@@ -161,9 +161,14 @@ def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -
 # ===== Auth =====
 def login():
     st.sidebar.title("🔐 Ingreso")
-    cedula = st.sidebar.text_input("Cédula")
-    contrasena = st.sidebar.text_input("Contraseña", type="password")
-    if st.sidebar.button("Ingresar"):
+
+    # Usar un form evita que se creen/doble-rendericen widgets en reruns
+    with st.sidebar.form("login_form", clear_on_submit=False):
+        cedula = st.text_input("Cédula", key="login_cedula")
+        contrasena = st.text_input("Contraseña", type="password", key="login_pwd")
+        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+
+    if submitted:
         try:
             users = pd.read_excel(USUARIOS_FILE, dtype=str)
             ok = users[(users["Cedula"] == cedula) & (users["Contrasena"] == contrasena)]
@@ -176,6 +181,7 @@ def login():
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
+
 
 # ===== App =====
 def main_app():
@@ -591,13 +597,6 @@ def main_app():
             k3.metric("Avance total vs meta", f"{(comp['Cuentas reales'].sum()/total_meta*100 if total_meta else 0):.1f}%")
 
 # ===== Boot =====
-if "autenticado" not in st.session_state:
-    login()
-elif st.session_state.get("autenticado"):
-    main_app()
-
-
-# ====== Boot ======
 if "autenticado" not in st.session_state:
     login()
 elif st.session_state.get("autenticado"):
