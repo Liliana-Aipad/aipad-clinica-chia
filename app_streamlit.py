@@ -229,13 +229,33 @@ def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
             g_vig.to_excel(writer, sheet_name="Por_Vigencia")
     return output.getvalue()
 
+
+def check_pdf_dependencies() -> tuple[bool, str]:
+    try:
+        import reportlab  # noqa: F401
+    except Exception as e:
+        return False, f"Falta reportlab: {e}"
+    try:
+        import kaleido  # noqa: F401
+    except Exception as e:
+        return False, f"Falta kaleido: {e}"
+    try:
+        import plotly.graph_objects as go
+        # Prueba mínima de render a imagen en memoria
+        fig = go.Figure(go.Scatter(x=[0,1], y=[0,1]))
+        _ = fig.to_image(format="png", scale=1, engine="kaleido")
+    except Exception as e:
+        return False, f"Plotly/Kaleido no pudieron renderizar imágenes: {e}"
+    return True, "OK"
+
 def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
-    """Genera un PDF con KPIs + gráficos. Requiere reportlab y kaleido.
-       Si faltan, levanta excepción para manejo arriba.
+    """Genera un PDF con KPIs + gráficos.
+       Usa kaleido en memoria (sin archivos temporales) + reportlab.
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
     from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
     import plotly.express as px
 
     # Crear figuras (similares a las del dashboard)
@@ -254,20 +274,17 @@ def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
         figs.append(px.bar(df, x="Vigencia", y="Valor", color="Estado", barmode="group",
                            title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES))
 
-    # Guardar imágenes temporales con kaleido
-    tmpdir = tempfile.mkdtemp()
-    img_paths = []
-    for i, f in enumerate(figs, start=1):
-        p = os.path.join(tmpdir, f"fig_{i}.png")
-        f.write_image(p, scale=2)  # requiere kaleido
-        img_paths.append(p)
+    # Renderizar cada figura a PNG en memoria
+    images = []
+    for f in figs:
+        img_bytes = f.to_image(format="png", scale=2, engine="kaleido")
+        images.append(ImageReader(io.BytesIO(img_bytes)))
 
     # Crear PDF
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
 
-    # KPIs
     total = len(df)
     radicadas = int((df["Estado"] == "Radicada").sum()) if "Estado" in df.columns else 0
     total_valor = float(df["Valor"].fillna(0).sum()) if "Valor" in df.columns else 0
@@ -281,8 +298,8 @@ def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
     c.drawString(2*cm, H-4.2*cm, f"% Avance (radicadas): {avance}%")
 
     y = H-5.2*cm
-    for p in img_paths:
-        c.drawImage(p, 2*cm, y-8*cm, width=W-4*cm, height=8*cm, preserveAspectRatio=True, anchor='n')
+    for img in images:
+        c.drawImage(img, 2*cm, y-8*cm, width=W-4*cm, height=8*cm, preserveAspectRatio=True, anchor='n')
         y -= 9*cm
         if y < 6*cm:
             c.showPage()
@@ -294,7 +311,7 @@ def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
     buf.close()
     return pdf_bytes
 
-# ====== APP ======
+
 def main_app():
     st.caption(f"🆔 Versión: {APP_VERSION}")
     st.title("📊 AIPAD • Control de Radicación")
@@ -430,17 +447,21 @@ def main_app():
                     use_container_width=True
                 )
             with cdb2:
-                try:
-                    pdf_bytes = exportar_dashboard_pdf(df)
-                    st.download_button(
-                        "⬇️ Descargar Dashboard en PDF",
-                        data=pdf_bytes,
-                        file_name="dashboard_radicacion.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.info("Para exportar a PDF instala las dependencias: `reportlab` y `kaleido`.")
+                ok_deps, detail = check_pdf_dependencies()
+                if ok_deps:
+                    try:
+                        pdf_bytes = exportar_dashboard_pdf(df)
+                        st.download_button(
+                            "⬇️ Descargar Dashboard en PDF",
+                            data=pdf_bytes,
+                            file_name="dashboard_radicacion.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        st.error(f"No se pudo generar el PDF: {e}")
+                else:
+                    st.warning("PDF no disponible: " + detail)
 
     # ---- BANDEJAS (por estado, con filtros y paginación) ----
     with tab2:
