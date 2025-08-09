@@ -510,52 +510,165 @@ def main_app():
                         st.error(f"❌ No pude confirmar el guardado: {msg}")
 
     # ===== Reportes =====
-    with tab_reportes:
-        show_flash()
-        st.subheader("📑 Reportes")
-        if df.empty:
-            st.info("No hay datos para reportar.")
-        else:
-            total = len(df)
-            valor_total = float(df.get("Valor", pd.Series(dtype=float)).fillna(0).sum())
-            radicadas = int((df_view["EstadoCanon"]=="Radicada").sum())
-            avance = round((radicadas/total*100),2) if total else 0.0
 
-            k1,k2,k3 = st.columns(3)
-            k1.metric("# Facturas", f"{total:,}")
-            k2.metric("Valor total", f"${valor_total:,.0f}")
-            k3.metric("% Avance", f"{avance}%")
+  # ===== Reportes =====
+with tab_reportes:
+    show_flash()
+    st.subheader("📑 Reportes")
+    if df.empty:
+        st.info("No hay datos para reportar.")
+    else:
+        # Selector de reporte
+        tipo = st.selectbox(
+            "Elige el reporte",
+            ["Por EPS", "Por Vigencia", "Por Estado"],
+            index=0
+        )
 
-            if {"EPS","NumeroFactura"}.issubset(df.columns):
-                eps_count = df.groupby("EPS")["NumeroFactura"].count().reset_index(name="Facturas")
-                st.plotly_chart(px.funnel(eps_count.sort_values("Facturas", ascending=False).head(25),
-                                          x="Facturas", y="EPS", title="Embudo por EPS (Top 25)"),
-                                use_container_width=True)
-            if {"Vigencia","NumeroFactura"}.issubset(df.columns):
-                vig_cnt = df.groupby("Vigencia")["NumeroFactura"].count().reset_index(name="Facturas")
-                fig_vig_donut = px.pie(vig_cnt, names="Vigencia", values="Facturas", hole=0.4, title="Participación por Vigencia")
+        # Helpers de agregación
+        def agg_eps(data: pd.DataFrame) -> pd.DataFrame:
+            g = data.groupby("EPS", dropna=False).agg(
+                Cuentas=("NumeroFactura","count"),
+                Valor=("Valor","sum"),
+                Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+            ).reset_index().fillna(0)
+            g["% Avance"] = (g["Radicadas"] / g["Cuentas"].where(g["Cuentas"]!=0, pd.NA) * 100).fillna(0).round(2)
+            return g.sort_values("Cuentas", ascending=False)
+
+        def agg_vig(data: pd.DataFrame) -> pd.DataFrame:
+            g = data.groupby("Vigencia", dropna=False).agg(
+                Cuentas=("NumeroFactura","count"),
+                Valor=("Valor","sum"),
+                Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+            ).reset_index().fillna(0)
+            g["% Avance"] = (g["Radicadas"] / g["Cuentas"].where(g["Cuentas"]!=0, pd.NA) * 100).fillna(0).round(2)
+            return g.sort_values("Cuentas", ascending=False)
+
+        def agg_estado(data: pd.DataFrame) -> pd.DataFrame:
+            g = data.groupby("Estado", dropna=False).agg(
+                Cuentas=("NumeroFactura","count"),
+                Valor=("Valor","sum")
+            ).reset_index().fillna(0)
+            return g.sort_values("Cuentas", ascending=False)
+
+        # Exportador Excel según selección
+        def exportar_excel(df_tab: pd.DataFrame, sheet_name: str, extra_sheets: dict | None = None) -> bytes:
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="openpyxl") as w:
+                df_tab.to_excel(w, index=False, sheet_name=sheet_name)
+                if extra_sheets:
+                    for name, dfx in extra_sheets.items():
+                        dfx.to_excel(w, index=False, sheet_name=name)
+            return out.getvalue()
+
+        # ====== POR EPS ======
+        if tipo == "Por EPS":
+            tabla = agg_eps(df)
+
+            st.markdown("### 🏥 Tabla por EPS")
+            st.dataframe(tabla, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            # Embudo: cantidad y %
+            total_cnt = int(tabla["Cuentas"].sum())
+            tabla_plot = tabla.copy()
+            tabla_plot["%"] = (tabla_plot["Cuentas"]/total_cnt*100).round(1) if total_cnt else 0
+            with c1:
+                fig_funnel = px.funnel(
+                    tabla_plot.head(25),
+                    x="Cuentas", y="EPS",
+                    title="Cantidad y % por EPS"
+                )
+                fig_funnel.update_traces(
+                    text=tabla_plot.head(25).apply(lambda r: f"{int(r['Cuentas'])} ({r['%']}%)", axis=1),
+                    textposition="inside"
+                )
+                st.plotly_chart(fig_funnel, use_container_width=True)
+            # Barras: valor radicado (solo Radicadas)
+            with c2:
+                df_rad = df[df["Estado"]=="Radicada"].copy()
+                g_val = df_rad.groupby("EPS", dropna=False)["Valor"].sum().reset_index(name="Valor Radicado")
+                g_val = g_val.sort_values("Valor Radicado", ascending=False)
+                fig_val = px.bar(
+                    g_val, x="EPS", y="Valor Radicado",
+                    title="Valor radicado por EPS",
+                    text_auto=".2s"
+                )
+                fig_val.update_layout(xaxis={'categoryorder':'total descending'})
+                st.plotly_chart(fig_val, use_container_width=True)
+
+            st.download_button(
+                "⬇️ Descargar reporte EPS (Excel)",
+                data=exportar_excel(tabla, "Por_EPS"),
+                file_name="reporte_por_eps.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        # ====== POR VIGENCIA ======
+        elif tipo == "Por Vigencia":
+            tabla = agg_vig(df)
+
+            st.markdown("### 📆 Tabla por Vigencia")
+            st.dataframe(tabla, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_vig_val = px.bar(
+                    df, x="Vigencia", y="Valor", color="Estado",
+                    title="Valor por Vigencia (por Estado)",
+                    barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
+                )
+                st.plotly_chart(fig_vig_val, use_container_width=True)
+            with c2:
+                g_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cuentas")
+                fig_vig_donut = px.pie(
+                    g_cnt, names="Vigencia", values="Cuentas",
+                    hole=0.45, title="Distribución de Cuentas por Vigencia"
+                )
                 fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
                 st.plotly_chart(fig_vig_donut, use_container_width=True)
 
-            def exportar_reportes_excel():
-                out = io.BytesIO()
-                with pd.ExcelWriter(out, engine="openpyxl") as w:
-                    pd.DataFrame({"Métrica":["# Facturas","Valor total","% Avance"],
-                                  "Valor":[total,valor_total,avance]}).to_excel(w, index=False, sheet_name="Resumen")
-                    if "EPS" in df.columns:
-                        df.groupby("EPS", dropna=False).agg(Facturas=("NumeroFactura","count"), Valor=("Valor","sum")).reset_index()\
-                          .to_excel(w, index=False, sheet_name="Por_EPS")
-                    if "Vigencia" in df.columns:
-                        df.groupby("Vigencia", dropna=False).agg(Facturas=("NumeroFactura","count"), Valor=("Valor","sum")).reset_index()\
-                          .to_excel(w, index=False, sheet_name="Por_Vigencia")
-                return out.getvalue()
+            st.download_button(
+                "⬇️ Descargar reporte Vigencia (Excel)",
+                data=exportar_excel(tabla, "Por_Vigencia"),
+                file_name="reporte_por_vigencia.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
-            st.download_button("⬇️ Descargar reportes a Excel",
-                               data=exportar_reportes_excel(),
-                               file_name="reportes_radicacion.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+        # ====== POR ESTADO ======
+        else:  # "Por Estado"
+            tabla = agg_estado(df)
 
+            st.markdown("### 🧩 Tabla por Estado")
+            st.dataframe(tabla, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_estado = px.pie(
+                    tabla, names="Estado", values="Cuentas",
+                    hole=0.5, title="Distribución por Estado",
+                    color="Estado", color_discrete_map=ESTADO_COLORES
+                )
+                fig_estado.update_traces(textposition="inside", textinfo="percent+value")
+                st.plotly_chart(fig_estado, use_container_width=True)
+            with c2:
+                fig_bar = px.bar(
+                    tabla, x="Estado", y="Cuentas",
+                    title="Cuentas por Estado", text_auto=True,
+                    color="Estado", color_discrete_map=ESTADO_COLORES
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+            st.download_button(
+                "⬇️ Descargar reporte Estado (Excel)",
+                data=exportar_excel(tabla, "Por_Estado"),
+                file_name="reporte_por_estado.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+    
     # ===== Avance =====
     with tab_avance:
         show_flash()
