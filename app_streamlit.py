@@ -224,6 +224,27 @@ def main_app():
             c2.metric("💰 Valor total", f"${total_valor:,.0f}")
             c3.metric("📊 Avance (radicadas)", f"{avance}%")
 
+# --- Distribución por Estado (torta / anillo) ---
+if {"Estado","NumeroFactura"}.issubset(df.columns):
+    # Cantidad de facturas por estado (usa los nombres tal cual en tu archivo)
+    g_estado = df.groupby("Estado", dropna=False)["NumeroFactura"] \
+                 .count().reset_index(name="Cantidad")
+
+    # Donut con colores definidos en ESTADO_COLORES
+    fig_estado = px.pie(
+        g_estado,
+        names="Estado",
+        values="Cantidad",
+        hole=0.5,
+        title="Distribución por Estado",
+        color="Estado",
+        color_discrete_map=ESTADO_COLORES
+    )
+    # Mostrar % y cantidad dentro de cada segmento
+    fig_estado.update_traces(textposition="inside", textinfo="percent+value")
+    st.plotly_chart(fig_estado, use_container_width=True)
+
+
             st.markdown("## 🏥 Por EPS")
             e1,e2 = st.columns(2)
             if {"EPS","NumeroFactura"}.issubset(df.columns):
