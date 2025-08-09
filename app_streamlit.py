@@ -276,57 +276,37 @@ def main_app():
                 )
                 st.plotly_chart(fig_estado, use_container_width=True)
 
+
             # --- EPS ---
-            st.markdown("## 🏥 Por EPS")
+            st.markdown("## 🏥 Por EPS (Embudo)")
             if {"EPS","NumeroFactura"}.issubset(df.columns):
                 g = df.groupby("EPS", dropna=False).agg(
                     N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor", "sum"),
-                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g["% Avance"] = (g["Radicadas"].astype(float)/g["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
-                g = g.sort_values("N_Facturas", ascending=False)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    fig_eps_val = px.bar(
-                        df, x="EPS", y="Valor", color="Estado", barmode="group",
-                        title="Valor total por EPS", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
-                    )
-                    fig_eps_val.update_layout(xaxis={'categoryorder':'total descending'})
-                    st.plotly_chart(fig_eps_val, use_container_width=True)
-                with c2:
-                    fig_eps_cnt = px.bar(
-                        g, x=g.index, y="N_Facturas", title="Número de facturas por EPS",
-                        text=g["% Avance"].astype(str) + "%"
-                    )
-                    st.plotly_chart(fig_eps_cnt, use_container_width=True)
+                    Valor_Total=("Valor", "sum")
+                ).fillna(0).sort_values("N_Facturas", ascending=False).head(25)
+                fig_eps_funnel = px.funnel(
+                    g.reset_index(),
+                    x="N_Facturas",
+                    y="EPS",
+                    title="Embudo: Número de facturas por EPS (Top 25)"
+                )
+                st.plotly_chart(fig_eps_funnel, use_container_width=True)
 
             # --- Mes ---
-            st.markdown("## 📅 Por Mes")
+            st.markdown("## 📅 Por Mes (Torta/Anillo)")
             if {"Mes","NumeroFactura"}.issubset(df.columns):
                 g = df.groupby("Mes", dropna=False).agg(
                     N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor","sum"),
-                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g["% Avance"] = (g["Radicadas"].astype(float)/g["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    fig_mes_val = px.area(
-                        df, x="Mes", y="Valor", color="Estado",
-                        title="Valor total por Mes", line_group="Estado",
-                        color_discrete_map=ESTADO_COLORES
-                    )
-                    st.plotly_chart(fig_mes_val, use_container_width=True)
-                with c2:
-                    fig_mes_cnt = px.bar(
-                        g, x=g.index, y="N_Facturas", title="Facturas por Mes",
-                        text=g["% Avance"].astype(str) + "%"
-                    )
-                    st.plotly_chart(fig_mes_cnt, use_container_width=True)
-
+                    Valor_Total=("Valor","sum")
+                ).fillna(0).sort_values("N_Facturas", ascending=False)
+                fig_mes_pie = px.pie(
+                    g.reset_index(),
+                    names="Mes",
+                    values="N_Facturas",
+                    hole=0.5,
+                    title="Distribución de facturas por Mes"
+                )
+                st.plotly_chart(fig_mes_pie, use_container_width=True)
             # --- Vigencia ---
             st.markdown("## 📆 Por Vigencia")
             if {"Vigencia","NumeroFactura"}.issubset(df.columns):
@@ -654,30 +634,23 @@ def main_app():
 
             # Gráficos
             st.markdown("### Gráficos")
+
             if {"EPS","Estado"}.issubset(df.columns):
-                eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas")
-                fig_eps = px.bar(eps_count.sort_values("Facturas", ascending=False).head(25),
-                                 x="EPS", y="Facturas", title="Facturas por EPS (Top 25)",
-                                 text="Facturas")
-                fig_eps.update_traces(texttemplate="%{text}", textposition="outside")
-                fig_eps.update_layout(xaxis_tickangle=-45, uniformtext_minsize=10, uniformtext_mode="hide")
+                eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas").sort_values("Facturas", ascending=False).head(25)
+                fig_eps = px.funnel(eps_count, x="Facturas", y="EPS", title="Embudo: Facturas por EPS (Top 25)")
                 st.plotly_chart(fig_eps, use_container_width=True)
 
             if {"Vigencia","Estado"}.issubset(df.columns):
-                vig_estado = df.groupby(["Vigencia", "Estado"]).size().reset_index(name="Facturas")
-                fig_vig = px.bar(vig_estado, x="Vigencia", y="Facturas", color="Estado",
-                                 title="Distribución por Vigencia y Estado",
-                                 color_discrete_map=ESTADO_COLORES)
+                vig_count = df.groupby("Vigencia")["Estado"].count().reset_index(name="Facturas")
+                fig_vig = px.pie(vig_count, names="Vigencia", values="Facturas", hole=0.5,
+                                 title="Anillo: Distribución por Vigencia")
                 st.plotly_chart(fig_vig, use_container_width=True)
 
             if {"Mes","Estado"}.issubset(df.columns):
-                mes_estado = df.groupby(["Mes", "Estado"]).size().reset_index(name="Facturas")
-                mes_estado = mes_estado.sort_values("Mes")
-                fig_mes = px.area(mes_estado, x="Mes", y="Facturas", color="Estado",
-                                  groupnorm=None, title="Evolución mensual por Estado",
-                                  color_discrete_map=ESTADO_COLORES)
+                mes_count = df.groupby("Mes")["Estado"].count().reset_index(name="Facturas").sort_values("Facturas", ascending=False)
+                fig_mes = px.pie(mes_count, names="Mes", values="Facturas", hole=0.5,
+                                 title="Anillo: Distribución por Mes")
                 st.plotly_chart(fig_mes, use_container_width=True)
-
             # Tablas de resumen
             st.markdown("### Resúmenes")
             def tabla_resumen(df_, by, nombre):
