@@ -1,7 +1,7 @@
 
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 06:50"
+APP_VERSION = "2025-08-09 07:25 (fix inventario path + atomic save + diagnóstico)"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -13,9 +13,10 @@ from datetime import datetime, date
 import io, os, re
 import streamlit.components.v1 as components
 
-# === Archivos esperados en la raíz ===
-INVENTARIO_FILE = "inventario_cuentas.xlsx"
-USUARIOS_FILE   = "usuarios.xlsx"
+# ==== Rutas absolutas ====
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INVENTARIO_FILE = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
+USUARIOS_FILE   = os.path.join(BASE_DIR, "usuarios.xlsx")
 
 # Colores por estado (solo para vistas)
 ESTADO_COLORES = {
@@ -38,12 +39,11 @@ def _to_ts(d):
     return pd.to_datetime(d, errors="coerce") if d not in (None, "", pd.NaT) else pd.NaT
 
 def guardar_inventario(df: pd.DataFrame):
-    """Guarda DataFrame a Excel SOLO cuando el usuario lo decide."""
-    try:
-        with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
-            df.to_excel(w, index=False)
-    except Exception:
-        df.to_csv("inventario_cuentas.csv", index=False, encoding="utf-8-sig")
+    """Guarda DataFrame a Excel SOLO cuando el usuario lo decide (escritura atómica)."""
+    tmp_path = INVENTARIO_FILE + ".tmp"
+    with pd.ExcelWriter(tmp_path, engine="openpyxl") as w:
+        df.to_excel(w, index=False)
+    os.replace(tmp_path, INVENTARIO_FILE)   # swap atómico (Windows-friendly)
     st.cache_data.clear()
 
 @st.cache_data
@@ -202,6 +202,7 @@ def main_app():
 
                 with e1:
                     fig_funnel = px.funnel(g_cnt, x="Cantidad", y="EPS", title="Cantidad y % por EPS")
+                    # etiquetar cantidad y %
                     fig_funnel.update_traces(text=g_cnt.apply(lambda r: f"{int(r['Cantidad'])} ({r['%']}%)", axis=1),
                                              textposition="inside")
                     st.plotly_chart(fig_funnel, use_container_width=True)
@@ -224,12 +225,14 @@ def main_app():
 
             if {"Vigencia","Estado","Valor"}.issubset(df.columns):
                 with v1:
+                    # Barras por valor y estado
                     fig_vig_val = px.bar(df, x="Vigencia", y="Valor", color="Estado",
                                          title="Valor por Vigencia (por Estado)",
                                          barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s")
                     st.plotly_chart(fig_vig_val, use_container_width=True)
 
                 with v2:
+                    # Donut por cantidad de facturas por Vigencia
                     g_vig_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
                     fig_vig_donut = px.pie(g_vig_cnt, names="Vigencia", values="Cantidad",
                                            hole=0.4, title="Distribución de Facturas por Vigencia")
@@ -246,6 +249,19 @@ def main_app():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+
+            # ---- Diagnóstico de inventario ----
+            with st.expander("🧪 Diagnóstico de inventario"):
+                st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
+                cdx1, cdx2 = st.columns(2)
+                if cdx1.button("🔄 Forzar recarga desde disco"):
+                    st.cache_data.clear(); st.rerun()
+                if cdx2.button("👀 Ver últimas 5 filas (desde disco)"):
+                    try:
+                        df_disk = pd.read_excel(INVENTARIO_FILE)
+                        st.dataframe(df_disk.tail(5), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"No pude leer el archivo: {e}")
 
     # --------------------- Bandejas ---------------------
     with tab_bandejas:
@@ -271,7 +287,7 @@ def main_app():
                     sub = sub[sub["Vigencia"].astype(str) == str(vig)]
                 if qtext:
                     qn = str(qtext).strip().lower()
-                    sub = sub[sub["NumeroFactura"].astype(str).str.lower().str_contains(qn)]
+                    sub = sub[sub["NumeroFactura"].astype(str).str.lower().str.contains(qn)]
                 return sub
 
             def _paginar(df_, page, per_page_):
@@ -311,9 +327,12 @@ def main_app():
                     view.insert(0, "Seleccionar", sel_all)
                     edited = st.data_editor(
                         view, hide_index=True, use_container_width=True, num_rows="fixed",
-                        column_config={"Seleccionar": st.column_config.CheckboxColumn("Seleccionar", default=False)},
+                        column_config={
+                            "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", default=False),
+                        },
                         key=f"editor_{estado}_{current_page}",
                     )
+                    # Determinar seleccionados
                     try:
                         mask = edited["Seleccionar"].fillna(False).tolist()
                     except Exception:
@@ -352,21 +371,17 @@ def main_app():
                 idx = df[mask].index[0] if existe else None
                 fila = df.loc[idx] if existe else pd.Series(dtype=object)
 
+                # Defaults no destructivos
                 def getv(s, k, default=None):
                     v = s.get(k, default) if isinstance(s, pd.Series) else default
-                    try:
-                        if pd.isna(v):
-                            return default
-                    except Exception:
-                        pass
-                    return v
+                    return v if not (pd.isna(v) if hasattr(pd, "isna") else v is None) else default
 
                 def_val = {
                     "ID": getv(fila, "ID", ""),
                     "NumeroFactura": str(getv(fila, "NumeroFactura", numero_activo) or numero_activo),
                     "Valor": float(getv(fila, "Valor", 0) or 0.0),
                     "EPS": str(getv(fila, "EPS", "") or ""),
-                    "Vigencia": getv(fila, "Vigencia", date.today().year),
+                    "Vigencia": int(getv(fila, "Vigencia", date.today().year) or date.today().year) if str(getv(fila, "Vigencia", "")).isdigit() else getv(fila, "Vigencia", date.today().year),
                     "Estado": str(getv(fila, "Estado", "Pendiente") or "Pendiente"),
                     "FechaRadicacion": getv(fila, "FechaRadicacion", pd.NaT),
                     "FechaMovimiento": getv(fila, "FechaMovimiento", pd.NaT),
@@ -374,16 +389,19 @@ def main_app():
                     "Mes": str(getv(fila, "Mes","") or ""),
                 }
 
+                # Estado y Fecha de radicación (solo habilitar si es Radicada)
                 ctop1, ctop2, ctop3 = st.columns(3)
                 ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True)
-                est_val = ctop2.selectbox("Estado", options=ESTADOS,
-                                          index=ESTADOS.index(def_val["Estado"]) if def_val["Estado"] in ESTADOS else 0,
+                estados_opciones = ESTADOS
+                est_val = ctop2.selectbox("Estado", options=estados_opciones,
+                                          index=estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0,
                                           key="estado_val")
                 frad_disabled = (est_val != "Radicada")
                 frad_val = ctop3.date_input("Fecha de Radicación",
                                             value=(def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today()),
                                             disabled=frad_disabled, key="frad_val")
 
+                # Formulario principal
                 with st.form("form_factura", clear_on_submit=False):
                     c1, c2 = st.columns(2)
                     num_val = c1.text_input("Número de factura", value=def_val["NumeroFactura"])
@@ -412,15 +430,19 @@ def main_app():
                     if pd.notna(frad_ts) and not same_date:
                         mes_nuevo = f"{MES_NOMBRE[int(pd.to_datetime(frad_ts).month)]}"
 
+                    # Construcción de la fila a escribir (solo lo que el usuario cambió / definió)
                     # ID
                     if def_val["ID"]:
                         new_id = def_val["ID"]
                     else:
-                        if "ID" in df.columns and pd.to_numeric(df["ID"].str.extract(r'(\d+)', expand=False), errors="coerce").notna().any():
-                            mx = int(pd.to_numeric(df["ID"].str.extract(r'(\d+)', expand=False), errors="coerce").max())
-                            new_id = f"CHIA-{mx+1:04d}"
-                        else:
-                            new_id = "CHIA-0001"
+                        # Siguiente ID seguro
+                        try:
+                            # extraer números
+                            ids = pd.to_numeric(df["ID"].str.extract(r'(\d+)$')[0], errors="coerce")
+                            nextn = int(ids.max()) + 1 if ids.notna().any() else 1
+                        except Exception:
+                            nextn = 1
+                        new_id = f"CHIA-{nextn:04d}"
 
                     nueva = {
                         "ID": new_id,
