@@ -1,7 +1,7 @@
 
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 07:25 (fix inventario path + atomic save + diagnóstico)"
+APP_VERSION = "2025-08-09 07:25"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -10,13 +10,13 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
-import io, os, re
+import io, os, re, tempfile, uuid
 import streamlit.components.v1 as components
 
-# ==== Rutas absolutas ====
+# === Rutas absolutas ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVENTARIO_FILE = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
-USUARIOS_FILE   = os.path.join(BASE_DIR, "usuarios.xlsx")
+USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")
 
 # Colores por estado (solo para vistas)
 ESTADO_COLORES = {
@@ -39,11 +39,17 @@ def _to_ts(d):
     return pd.to_datetime(d, errors="coerce") if d not in (None, "", pd.NaT) else pd.NaT
 
 def guardar_inventario(df: pd.DataFrame):
-    """Guarda DataFrame a Excel SOLO cuando el usuario lo decide (escritura atómica)."""
-    tmp_path = INVENTARIO_FILE + ".tmp"
+    """Escritura atómica del inventario en .xlsx (no toca datos al cargar)."""
+    # Crear un .xlsx temporal en el mismo directorio para evitar problemas de permisos
+    dir_dest = os.path.dirname(INVENTARIO_FILE) or "."
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=dir_dest, delete=False) as tf:
+        tmp_path = tf.name
+    # Escribir primero al temporal
     with pd.ExcelWriter(tmp_path, engine="openpyxl") as w:
         df.to_excel(w, index=False)
-    os.replace(tmp_path, INVENTARIO_FILE)   # swap atómico (Windows-friendly)
+    # Reemplazar de forma atómica
+    os.replace(tmp_path, INVENTARIO_FILE)
+    # Limpiar caché
     st.cache_data.clear()
 
 @st.cache_data
@@ -202,7 +208,6 @@ def main_app():
 
                 with e1:
                     fig_funnel = px.funnel(g_cnt, x="Cantidad", y="EPS", title="Cantidad y % por EPS")
-                    # etiquetar cantidad y %
                     fig_funnel.update_traces(text=g_cnt.apply(lambda r: f"{int(r['Cantidad'])} ({r['%']}%)", axis=1),
                                              textposition="inside")
                     st.plotly_chart(fig_funnel, use_container_width=True)
@@ -239,6 +244,19 @@ def main_app():
                     fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
                     st.plotly_chart(fig_vig_donut, use_container_width=True)
 
+            # ---- Diagnóstico de inventario ----
+            with st.expander("🧪 Diagnóstico de inventario"):
+                st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
+                c1, c2 = st.columns(2)
+                if c1.button("🔄 Forzar recarga desde disco"):
+                    st.cache_data.clear(); st.rerun()
+                if c2.button("👀 Ver últimas 5 filas (desde disco)"):
+                    try:
+                        df_disk = pd.read_excel(INVENTARIO_FILE)
+                        st.dataframe(df_disk.tail(5), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"No pude leer el archivo: {e}")
+
             # Descarga Excel de Dashboard
             st.divider()
             xls_bytes = exportar_dashboard_excel(df, df_view)
@@ -249,19 +267,6 @@ def main_app():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-
-            # ---- Diagnóstico de inventario ----
-            with st.expander("🧪 Diagnóstico de inventario"):
-                st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
-                cdx1, cdx2 = st.columns(2)
-                if cdx1.button("🔄 Forzar recarga desde disco"):
-                    st.cache_data.clear(); st.rerun()
-                if cdx2.button("👀 Ver últimas 5 filas (desde disco)"):
-                    try:
-                        df_disk = pd.read_excel(INVENTARIO_FILE)
-                        st.dataframe(df_disk.tail(5), use_container_width=True)
-                    except Exception as e:
-                        st.error(f"No pude leer el archivo: {e}")
 
     # --------------------- Bandejas ---------------------
     with tab_bandejas:
@@ -430,16 +435,15 @@ def main_app():
                     if pd.notna(frad_ts) and not same_date:
                         mes_nuevo = f"{MES_NOMBRE[int(pd.to_datetime(frad_ts).month)]}"
 
-                    # Construcción de la fila a escribir (solo lo que el usuario cambió / definió)
-                    # ID
+                    # Generar ID si no existía
                     if def_val["ID"]:
                         new_id = def_val["ID"]
                     else:
-                        # Siguiente ID seguro
+                        # Buscar el mayor consecutivo CHIA-#### si existe
                         try:
-                            # extraer números
-                            ids = pd.to_numeric(df["ID"].str.extract(r'(\d+)$')[0], errors="coerce")
-                            nextn = int(ids.max()) + 1 if ids.notna().any() else 1
+                            nums = df.get("ID", pd.Series(dtype=object)).astype(str).str.extract(r"CHIA-(\d+)", expand=False)
+                            nums = pd.to_numeric(nums, errors="coerce").dropna()
+                            nextn = int(nums.max()) + 1 if not nums.empty else 1
                         except Exception:
                             nextn = 1
                         new_id = f"CHIA-{nextn:04d}"
@@ -526,10 +530,10 @@ def main_app():
             t_mes = tabla_resumen(df, "Mes", "Mes") if "Mes" in df.columns else pd.DataFrame()
 
             st.markdown("### Descarga")
-            xls_rep = exportar_reportes_excel(total, valor_total, avance, t_eps, t_vig, t_mes)
+            xls_bytes = exportar_reportes_excel(total, valor_total, avance, t_eps, t_vig, t_mes)
             st.download_button(
                 "⬇️ Descargar reportes a Excel",
-                data=xls_rep,
+                data=xls_bytes,
                 file_name="reportes_radicacion.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
@@ -574,8 +578,7 @@ def main_app():
             comp["Cuentas reales"] = comp["Cuentas reales"].astype(int)
             comp["Cuentas reales acumuladas"] = comp["Cuentas reales"].cumsum()
             comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
-            comp["% proyectado acumulado"] = base["% proyectado acumulado"]
-            comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - comp["% proyectado acumulado"]).round(2)
+            comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - base["% proyectado acumulado"]).round(2)
 
             st.dataframe(comp, use_container_width=True)
 
