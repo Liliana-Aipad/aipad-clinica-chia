@@ -2,7 +2,9 @@ streamlit
 pandas
 plotly
 openpyxl
-openpyxl
 reportlab
 kaleido
 requests
+gspread
+gspread_dataframe
+google-auth
