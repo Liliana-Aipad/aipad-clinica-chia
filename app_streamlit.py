@@ -1,18 +1,15 @@
-
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 01:05"
+APP_VERSION = "2025-08-09 02:10"
 
-import os, re, io
-from datetime import datetime, date
-from typing import Dict, Tuple, List
+import streamlit as st
+st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
 
 import pandas as pd
+import os, re, io, zipfile, tempfile
 import plotly.express as px
-import streamlit as st
+from datetime import datetime, date
 import streamlit.components.v1 as components
-
-st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
 
 # === Archivos esperados en la raíz ===
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -40,13 +37,12 @@ def _to_ts(d):
 
 def guardar_inventario(df: pd.DataFrame):
     """Guarda DataFrame al Excel y limpia caché."""
-    # usar openpyxl para evitar xlsxwriter
     try:
-        with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
+        # Usar openpyxl si está disponible; si no, CSV
+        with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
+            df.to_excel(w, index=False)
     except Exception:
-        # fallback
-        df.to_excel(INVENTARIO_FILE, index=False)
+        df.to_csv(Path(INVENTARIO_FILE).with_suffix(".csv"), index=False, encoding="utf-8-sig")
     st.cache_data.clear()
 
 def registro_por_factura(df: pd.DataFrame, numero_factura: str):
@@ -190,150 +186,113 @@ def aplicar_movimiento_masivo(df: pd.DataFrame, indices, nuevo_estado: str):
         df.at[idx, "FechaMovimiento"] = ahora
     guardar_inventario(df)
 
-# ====== Export helpers (Excel y PDF) ======
-def _dashboard_groupings(df: pd.DataFrame):
+# ====== Export helpers (Excel/PDF) ======
+def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    # Resúmenes iguales a lo mostrado en el dashboard
     total = len(df)
     radicadas = int((df["Estado"] == "Radicada").sum())
     total_valor = float(df["Valor"].fillna(0).sum())
     avance = round((radicadas / total) * 100, 2) if total else 0.0
 
-    g_eps = g_mes = g_vig = None
-    if {"EPS","NumeroFactura"}.issubset(df.columns):
-        g_eps = df.groupby("EPS", dropna=False).agg(
-            N_Facturas=("NumeroFactura","count"),
-            Valor_Total=("Valor", "sum"),
-            Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-        ).fillna(0)
-        g_eps["% Avance"] = (g_eps["Radicadas"].astype(float)/g_eps["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
-
-    if {"Mes","NumeroFactura"}.issubset(df.columns):
-        g_mes = df.groupby("Mes", dropna=False).agg(
-            N_Facturas=("NumeroFactura","count"),
-            Valor_Total=("Valor","sum"),
-            Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-        ).fillna(0)
-        g_mes["% Avance"] = (g_mes["Radicadas"].astype(float)/g_mes["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
-
-    if {"Vigencia","NumeroFactura"}.issubset(df.columns):
-        g_vig = df.groupby("Vigencia", dropna=False).agg(
-            N_Facturas=("NumeroFactura","count"),
-            Valor_Total=("Valor","sum"),
-            Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-        ).fillna(0)
-        g_vig["% Avance"] = (g_vig["Radicadas"].astype(float)/g_vig["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
-
-    return (total, total_valor, avance, radicadas), g_eps, g_mes, g_vig
-
-def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
-    output = io.BytesIO()
-    (total, total_valor, avance, _), g_eps, g_mes, g_vig = _dashboard_groupings(df)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        resumen_df = pd.DataFrame({
+        pd.DataFrame({
             "Métrica": ["Total facturas", "Valor total", "% Avance (radicadas)"],
             "Valor": [total, total_valor, avance]
-        })
-        resumen_df.to_excel(writer, index=False, sheet_name="Resumen")
+        }).to_excel(writer, index=False, sheet_name="Resumen")
 
-        if g_eps is not None:
+        if {"EPS","NumeroFactura"}.issubset(df.columns):
+            g_eps = df.groupby("EPS", dropna=False).agg(
+                N_Facturas=("NumeroFactura","count"),
+                Valor_Total=("Valor", "sum"),
+                Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+            ).fillna(0)
+            g_eps["% Avance"] = (g_eps["Radicadas"] / g_eps["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_eps.to_excel(writer, sheet_name="Por_EPS")
-        if g_mes is not None:
+
+        if {"Mes","NumeroFactura"}.issubset(df.columns):
+            g_mes = df.groupby("Mes", dropna=False).agg(
+                N_Facturas=("NumeroFactura","count"),
+                Valor_Total=("Valor","sum"),
+                Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+            ).fillna(0)
+            g_mes["% Avance"] = (g_mes["Radicadas"] / g_mes["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_mes.to_excel(writer, sheet_name="Por_Mes")
-        if g_vig is not None:
+
+        if {"Vigencia","NumeroFactura"}.issubset(df.columns):
+            g_vig = df.groupby("Vigencia", dropna=False).agg(
+                N_Facturas=("NumeroFactura","count"),
+                Valor_Total=("Valor","sum"),
+                Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+            ).fillna(0)
+            g_vig["% Avance"] = (g_vig["Radicadas"] / g_vig["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_vig.to_excel(writer, sheet_name="Por_Vigencia")
     return output.getvalue()
 
-def exportar_dashboard_pdf(df: pd.DataFrame, figs: Dict[str, "plotly.graph_objs.Figure"]) -> Tuple[bytes, str]:
-    """Genera PDF con KPIs y figuras. Requiere reportlab y kaleido.
-       Devuelve (pdf_bytes, warning_msg) donde warning_msg se llena si faltan dependencias.
+def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
+    """Genera un PDF con KPIs + gráficos. Requiere reportlab y kaleido.
+       Si faltan, levanta excepción para manejo arriba.
     """
-    warning = ""
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.utils import ImageReader
-    except Exception:
-        return b"", "Falta el paquete 'reportlab' en el entorno. Agrega 'reportlab' a requirements.txt."
-
-    # Exportar figuras a imágenes PNG con kaleido
-    images = {}
-    try:
-        for name, fig in figs.items():
-            images[name] = fig.to_image(format="png", scale=2)  # requiere kaleido
-    except Exception as e:
-        return b"", f"No fue posible exportar imágenes de los gráficos. Verifica que 'kaleido' esté instalado. Detalle: {e}"
-
-    # Calcular KPIs
-    (total, total_valor, avance, radicadas), g_eps, g_mes, g_vig = _dashboard_groupings(df)
-
     from reportlab.lib.pagesizes import A4
-    width, height = A4
-    margin = 36  # 0.5 inch
-    y = height - margin
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas
+    import plotly.express as px
 
-    buff = io.BytesIO()
-    c = canvas.Canvas(buff, pagesize=A4)
+    # Crear figuras (similares a las del dashboard)
+    figs = []
+    if "Estado" in df.columns:
+        figs.append(px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
+                           color="Estado", color_discrete_map=ESTADO_COLORES))
+    if {"EPS","Valor","Estado"}.issubset(df.columns):
+        figs.append(px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
+                           title="Valor total por EPS", color_discrete_map=ESTADO_COLORES))
+    if {"Mes","Estado","Valor"}.issubset(df.columns):
+        figs.append(px.area(df, x="Mes", y="Valor", color="Estado",
+                            title="Valor total por Mes", line_group="Estado",
+                            color_discrete_map=ESTADO_COLORES))
+    if {"Vigencia","Estado","Valor"}.issubset(df.columns):
+        figs.append(px.bar(df, x="Vigencia", y="Valor", color="Estado", barmode="group",
+                           title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES))
 
-    # Título
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(margin, y, "Dashboard de Radicación - Clínica Chía")
-    y -= 18
-    c.setFont("Helvetica", 9)
-    c.drawString(margin, y, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y -= 18
+    # Guardar imágenes temporales con kaleido
+    tmpdir = tempfile.mkdtemp()
+    img_paths = []
+    for i, f in enumerate(figs, start=1):
+        p = os.path.join(tmpdir, f"fig_{i}.png")
+        f.write_image(p, scale=2)  # requiere kaleido
+        img_paths.append(p)
+
+    # Crear PDF
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
 
     # KPIs
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(margin, y, "KPIs")
-    y -= 14
-    c.setFont("Helvetica", 10)
-    for line in [
-        f"Total facturas: {total:,}",
-        f"Valor total: ${total_valor:,.0f}",
-        f"% Avance (radicadas): {avance:.2f}%  (Radicadas: {radicadas:,})",
-    ]:
-        c.drawString(margin, y, line)
-        y -= 14
+    total = len(df)
+    radicadas = int((df["Estado"] == "Radicada").sum()) if "Estado" in df.columns else 0
+    total_valor = float(df["Valor"].fillna(0).sum()) if "Valor" in df.columns else 0
+    avance = round((radicadas / total) * 100, 2) if total else 0.0
 
-    # Insertar imágenes, una por bloque
-    def place_image(img_bytes, caption: str, y: float) -> float:
-        from reportlab.lib.utils import ImageReader
-        max_w = width - 2*margin
-        img = ImageReader(io.BytesIO(img_bytes))
-        iw, ih = img.getSize()
-        ratio = max_w / iw
-        new_w = max_w
-        new_h = ih * ratio
-        if y - new_h < margin:
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(2*cm, H-2*cm, "Dashboard - Resumen")
+    c.setFont("Helvetica", 11)
+    c.drawString(2*cm, H-3*cm, f"Total facturas: {total}")
+    c.drawString(2*cm, H-3.6*cm, f"Valor total: ${total_valor:,.0f}")
+    c.drawString(2*cm, H-4.2*cm, f"% Avance (radicadas): {avance}%")
+
+    y = H-5.2*cm
+    for p in img_paths:
+        c.drawImage(p, 2*cm, y-8*cm, width=W-4*cm, height=8*cm, preserveAspectRatio=True, anchor='n')
+        y -= 9*cm
+        if y < 6*cm:
             c.showPage()
-            y2 = height - margin
-        else:
-            y2 = y
-        c.drawImage(img, margin, y2 - new_h, width=new_w, height=new_h)
-        y2 = y2 - new_h - 12
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(margin, y2, caption)
-        y2 -= 10
-        return y2
-
-    c.setFont("Helvetica", 10)
-    order = [
-        ("estado", "Distribución por Estado"),
-        ("eps_val", "Valor total por EPS"),
-        ("eps_cnt", "Número de facturas por EPS"),
-        ("mes_val", "Valor total por Mes"),
-        ("mes_cnt", "Facturas por Mes"),
-        ("vig_val", "Valor por Vigencia"),
-        ("vig_pie", "Distribución por Vigencia"),
-    ]
-    for key, caption in order:
-        if key in images:
-            y = place_image(images[key], caption, y)
+            y = H-2*cm
 
     c.showPage()
     c.save()
-    data = buff.getvalue()
-    buff.close()
-    return data, warning
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
 
 # ====== APP ======
 def main_app():
@@ -351,8 +310,8 @@ def main_app():
 
     df = load_data()
 
-    tab_labels = ["📋 Dashboard", "🗂️ Bandejas", "📝 Gestión"]
-    tab1, tab2, tab3 = st.tabs(tab_labels)
+    tab_labels = ["📋 Dashboard", "🗂️ Bandejas", "📝 Gestión", "📑 Reportes"]
+    tab1, tab2, tab3, tab4 = st.tabs(tab_labels)
 
     # Si hay query param ?tab=bandejas o ?tab=gestion, forzar selección
     if qp.get("tab", [""])[0] == "bandejas":
@@ -363,8 +322,6 @@ def main_app():
     # ---- DASHBOARD ----
     with tab1:
         st.subheader("📈 Avance general del proyecto")
-        figs = {}
-
         if df.empty:
             st.info("No hay datos en el inventario.")
         else:
@@ -385,7 +342,6 @@ def main_app():
                     color="Estado", color_discrete_map=ESTADO_COLORES
                 )
                 st.plotly_chart(fig_estado, use_container_width=True)
-                figs["estado"] = fig_estado
 
             # --- EPS ---
             st.markdown("## 🏥 Por EPS")
@@ -406,14 +362,12 @@ def main_app():
                     )
                     fig_eps_val.update_layout(xaxis={'categoryorder':'total descending'})
                     st.plotly_chart(fig_eps_val, use_container_width=True)
-                    figs["eps_val"] = fig_eps_val
                 with c2:
                     fig_eps_cnt = px.bar(
                         g, x=g.index, y="N_Facturas", title="Número de facturas por EPS",
                         text=g["% Avance"].astype(str) + "%"
                     )
                     st.plotly_chart(fig_eps_cnt, use_container_width=True)
-                    figs["eps_cnt"] = fig_eps_cnt
 
             # --- Mes ---
             st.markdown("## 📅 Por Mes")
@@ -433,14 +387,12 @@ def main_app():
                         color_discrete_map=ESTADO_COLORES
                     )
                     st.plotly_chart(fig_mes_val, use_container_width=True)
-                    figs["mes_val"] = fig_mes_val
                 with c2:
                     fig_mes_cnt = px.bar(
                         g, x=g.index, y="N_Facturas", title="Facturas por Mes",
                         text=g["% Avance"].astype(str) + "%"
                     )
                     st.plotly_chart(fig_mes_cnt, use_container_width=True)
-                    figs["mes_cnt"] = fig_mes_cnt
 
             # --- Vigencia ---
             st.markdown("## 📆 Por Vigencia")
@@ -459,17 +411,16 @@ def main_app():
                         title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
                     )
                     st.plotly_chart(fig_vig_val, use_container_width=True)
-                    figs["vig_val"] = fig_vig_val
                 with c2:
                     fig_vig_pie = px.pie(
                         df, names="Vigencia", hole=0.5, title="Distribución de Facturas por Vigencia"
                     )
                     st.plotly_chart(fig_vig_pie, use_container_width=True)
-                    figs["vig_pie"] = fig_vig_pie
 
+            # --- Descargas Dashboard ---
             st.divider()
-            c1, c2 = st.columns(2)
-            with c1:
+            cdb1, cdb2 = st.columns(2)
+            with cdb1:
                 xls_bytes = exportar_dashboard_excel(df)
                 st.download_button(
                     "⬇️ Descargar Dashboard a Excel",
@@ -478,9 +429,9 @@ def main_app():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
-            with c2:
-                pdf_bytes, warn = exportar_dashboard_pdf(df, figs)
-                if pdf_bytes:
+            with cdb2:
+                try:
+                    pdf_bytes = exportar_dashboard_pdf(df)
                     st.download_button(
                         "⬇️ Descargar Dashboard en PDF",
                         data=pdf_bytes,
@@ -488,8 +439,8 @@ def main_app():
                         mime="application/pdf",
                         use_container_width=True
                     )
-                if warn:
-                    st.warning(warn)
+                except Exception as e:
+                    st.info("Para exportar a PDF instala las dependencias: `reportlab` y `kaleido`.")
 
     # ---- BANDEJAS (por estado, con filtros y paginación) ----
     with tab2:
@@ -550,8 +501,9 @@ def main_app():
 
                     cols_mostrar = ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"]
                     view = sub_page[cols_mostrar].copy()
-                    view.insert(0, "Seleccionar", sel_all)   # por defecto según el checkbox global
-                    view.insert(1, "__idx", sub_page.index)   # índice original para mapear
+                    view.insert(0, "Seleccionar", sel_all)
+                    view.insert(1, "__idx", sub_page.index)
+
                     column_order = ["Seleccionar","ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones","__idx"]
 
                     edited = st.data_editor(
@@ -571,7 +523,7 @@ def main_app():
                             "FechaMovimiento": st.column_config.Column("Fecha Movimiento", disabled=True),
                             "Observaciones": st.column_config.Column("Observaciones", disabled=True),
                         },
-                        column_order=column_order[:-1],  # no mostrar __idx
+                        column_order=column_order[:-1],
                         key=f"editor_{estado}_{current_page}",
                     )
 
@@ -696,7 +648,7 @@ def main_app():
                 with c1:
                     num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
                     valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
-                    eps_val = st.text_input("EPS", value=def_val["EPS"])
+                    eps_val = st.selectbox("EPS", options=[""] + eps_opciones, index=([""]+eps_opciones).index(def_val["EPS"]) if def_val["EPS"] in ([""]+eps_opciones) else 0)
                 with c2:
                     vig_set = sorted(set(vigencias))
                     vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(def_val["Vigencia"]) if def_val["Vigencia"] in vig_set else 0)
@@ -706,7 +658,7 @@ def main_app():
 
             if submit:
                 ahora = pd.Timestamp(datetime.now())
-                # Estado y FechaRadicación de los widgets de arriba
+                # Tomar Estado y FechaRadicación de los widgets FUERA del form
                 estado_actual = st.session_state.get("estado_val", def_val["Estado"])
                 frad_widget = st.session_state.get("frad_val", date.today())
                 frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else pd.NaT
@@ -721,7 +673,7 @@ def main_app():
                     "ID": new_id,
                     "NumeroFactura": str(num_val).strip(),
                     "Valor": float(valor_val),
-                    "EPS": str(eps_val).strip(),
+                    "EPS": eps_val.strip(),
                     "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
                     "Estado": estado_actual,
                     "FechaRadicacion": frad_ts,
@@ -729,7 +681,7 @@ def main_app():
                     "Mes": mes_calc
                 }
 
-                # FechaMovimiento: SOLO cuando cambia el Estado o es nuevo
+                # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
                 estado_anterior = str(fila.get("Estado","")) if existe else ""
                 estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
 
@@ -750,7 +702,6 @@ def main_app():
                     st.success("✅ Cambios guardados. El formulario fue limpiado.")
                     # Limpiar formulario sin ir al Dashboard y mantener pestaña Gestión
                     st.session_state["factura_activa"] = ""
-                    # limpiar widgets usados
                     for k in ["estado_val", "frad_val", "buscar_factura_input"]:
                         if k in st.session_state:
                             del st.session_state[k]
@@ -758,6 +709,98 @@ def main_app():
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error guardando el inventario: {e}")
+
+    # ---- REPORTES ----
+    with tab4:
+        st.subheader("📑 Reportes")
+        if df.empty:
+            st.info("No hay datos en el inventario para generar reportes.")
+        else:
+            # KPIs
+            total = len(df)
+            valor_total = float(df["Valor"].fillna(0).sum())
+            radicadas = int((df["Estado"] == "Radicada").sum())
+            avance = round((radicadas / total) * 100, 2) if total else 0.0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Número de facturas", f"{total:,}")
+            c2.metric("Valor total", f"${valor_total:,.0f}")
+            c3.metric("% avance general", f"{avance}%")
+
+            # Asegurar 'Mes' si hace falta
+            if "Mes" not in df.columns:
+                if "FechaRadicacion" in df.columns:
+                    df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.to_period("M").astype(str)
+                else:
+                    df["Mes"] = "Sin Mes"
+
+            # Gráficos
+            st.markdown("### Gráficos")
+            if {"EPS","Estado"}.issubset(df.columns):
+                eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas")
+                fig_eps = px.bar(eps_count.sort_values("Facturas", ascending=False).head(25),
+                                 x="EPS", y="Facturas", title="Facturas por EPS (Top 25)",
+                                 text="Facturas")
+                fig_eps.update_traces(texttemplate="%{text}", textposition="outside")
+                fig_eps.update_layout(xaxis_tickangle=-45, uniformtext_minsize=10, uniformtext_mode="hide")
+                st.plotly_chart(fig_eps, use_container_width=True)
+
+            if {"Vigencia","Estado"}.issubset(df.columns):
+                vig_estado = df.groupby(["Vigencia", "Estado"]).size().reset_index(name="Facturas")
+                fig_vig = px.bar(vig_estado, x="Vigencia", y="Facturas", color="Estado",
+                                 title="Distribución por Vigencia y Estado",
+                                 color_discrete_map=ESTADO_COLORES)
+                st.plotly_chart(fig_vig, use_container_width=True)
+
+            if {"Mes","Estado"}.issubset(df.columns):
+                mes_estado = df.groupby(["Mes", "Estado"]).size().reset_index(name="Facturas")
+                mes_estado = mes_estado.sort_values("Mes")
+                fig_mes = px.area(mes_estado, x="Mes", y="Facturas", color="Estado",
+                                  groupnorm=None, title="Evolución mensual por Estado",
+                                  color_discrete_map=ESTADO_COLORES)
+                st.plotly_chart(fig_mes, use_container_width=True)
+
+            # Tablas de resumen
+            st.markdown("### Resúmenes")
+            def tabla_resumen(df_, by, nombre):
+                g = df_.groupby(by, dropna=False).agg(
+                    Facturas=("Estado", "count"),
+                    Valor=("Valor", "sum"),
+                    Radicadas=("Estado", lambda s: (s == "Radicada").sum()),
+                    Pendientes=("Estado", lambda s: (s == "Pendiente").sum()),
+                    Auditadas=("Estado", lambda s: (s == "Auditada").sum()),
+                    Subsanadas=("Estado", lambda s: (s == "Subsanada").sum()),
+                ).reset_index()
+                g["% Avance"] = (g["Radicadas"] / g["Facturas"]).fillna(0) * 100
+                st.subheader(f"Resumen por {nombre}")
+                st.dataframe(g, use_container_width=True)
+                return g
+
+            t_eps = tabla_resumen(df, "EPS", "EPS") if "EPS" in df.columns else pd.DataFrame()
+            t_vig = tabla_resumen(df, "Vigencia", "Vigencia") if "Vigencia" in df.columns else pd.DataFrame()
+            t_mes = tabla_resumen(df, "Mes", "Mes") if "Mes" in df.columns else pd.DataFrame()
+
+            # Exportar a Excel
+            st.markdown("### Descarga")
+            def exportar_reportes_excel():
+                out = io.BytesIO()
+                with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                    pd.DataFrame(
+                        {"Métrica": ["# Facturas", "Valor total", "% Avance general"],
+                         "Valor": [total, valor_total, avance]}
+                    ).to_excel(writer, index=False, sheet_name="Resumen")
+                    if not t_eps.empty: t_eps.to_excel(writer, index=False, sheet_name="Por_EPS")
+                    if not t_vig.empty: t_vig.to_excel(writer, index=False, sheet_name="Por_Vigencia")
+                    if not t_mes.empty: t_mes.to_excel(writer, index=False, sheet_name="Por_Mes")
+                return out.getvalue()
+
+            xls_bytes_rep = exportar_reportes_excel()
+            st.download_button(
+                "⬇️ Descargar reportes a Excel",
+                data=xls_bytes_rep,
+                file_name="reportes_radicacion.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
 # ====== BOOT ======
 if "autenticado" not in st.session_state:
