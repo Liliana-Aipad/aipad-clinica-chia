@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 10:40"
+APP_VERSION = "2025-08-09 12:05 • Sheets"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -9,14 +9,17 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
-import io, os, re, base64, json, requests, time, tempfile
+import io, os, re, time
 import streamlit.components.v1 as components
 
-# ===== Rutas absolutas =====
+# ===== Google Sheets =====
+import gspread
+from google.oauth2.service_account import Credentials
+from gspread_dataframe import get_as_dataframe, set_with_dataframe
+
+# ===== Rutas locales solo para usuarios (login)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INVENTARIO_FILE = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
-USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")
-LOCK_FILE      = os.path.join(BASE_DIR, ".inventario.lock")
+USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")  # si no lo usas, puedes quitar login y este archivo
 
 # ===== Visual =====
 ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
@@ -24,7 +27,7 @@ ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
 MES_NOMBRE = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
               7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
-# ===== UI helpers =====
+# ===== Helpers UI =====
 def flash_success(msg: str):
     st.session_state["_flash_ok"] = msg
 
@@ -33,120 +36,91 @@ def show_flash():
     if msg:
         st.success(msg)
 
-# ===== GitHub (opcional) =====
-def github_enabled() -> bool:
-    try:
-        s = st.secrets.get("github", None)
-        return isinstance(s, dict) and all(k in s for k in ("token","owner","repo"))
-    except Exception:
-        return False
+def _select_tab(label: str):
+    js = f"""
+    <script>
+    window.addEventListener('load', () => {{
+        const labels = Array.from(parent.document.querySelectorAll('button[role="tab"]'));
+        const target = labels.find(el => el.innerText.trim() === "{label}");
+        if (target) target.click();
+    }});
+    </script>
+    """
+    components.html(js, height=0, scrolling=False)
 
-def _gh_headers():
-    tok = st.secrets["github"]["token"]
-    return {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
+# ===== Google Sheets helpers =====
+def _open_worksheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open(st.secrets["googlesheets"]["spreadsheet_name"])
+    ws = sh.worksheet(st.secrets["googlesheets"]["worksheet_name"])
+    return ws
 
-def _gh_repo_info():
-    s = st.secrets["github"]
-    return s["owner"], s["repo"], s.get("branch","main"), s.get("file_path","inventario_cuentas.xlsx")
-
-def gh_get_file_sha():
-    owner, repo, branch, path = _gh_repo_info()
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=20)
-    if r.status_code == 200:
-        return r.json()["sha"]
-    elif r.status_code == 404:
-        return None
-    else:
-        raise RuntimeError(f"GitHub GET error {r.status_code}: {r.text}")
-
-def gh_put_file(content_bytes: bytes, message: str, sha: str|None):
-    owner, repo, branch, path = _gh_repo_info()
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    data = {"message": message, "content": base64.b64encode(content_bytes).decode("utf-8"), "branch": branch}
-    if sha: data["sha"] = sha
-    r = requests.put(url, headers=_gh_headers(), data=json.dumps(data), timeout=45)
-    if r.status_code not in (200,201):
-        raise RuntimeError(f"GitHub PUT error {r.status_code}: {r.text}")
-    return r.json()
-
-# ===== Data =====
 @st.cache_data
 def load_data():
-    if not os.path.exists(INVENTARIO_FILE):
-        cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
-                "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
-        return pd.DataFrame(columns=cols)
-    df = pd.read_excel(INVENTARIO_FILE)
-    for c in ["FechaRadicacion","FechaMovimiento"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    if "Valor" in df.columns:
+    """Lee todo el inventario desde Google Sheets."""
+    try:
+        ws = _open_worksheet()
+        df = get_as_dataframe(ws, evaluate_formulas=True, header=0)  # usa fila 1 como encabezados
+        # eliminar columnas sin nombre / vacías
+        df = df.loc[:, ~df.columns.isnull()]
+        # Asegurar columnas mínimas
+        cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","Mes",
+                "FechaRadicacion","FechaMovimiento","Observaciones"]
+        for c in cols:
+            if c not in df.columns:
+                df[c] = pd.NA
+        # Tipos
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
-    if "Vigencia" in df.columns:
         df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
-    return df
+        for c in ["FechaRadicacion","FechaMovimiento"]:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+        # Quitar filas totalmente vacías
+        df = df.dropna(how="all")
+        return df[cols].copy()
+    except Exception as e:
+        st.error(f"Error leyendo Google Sheets: {e}")
+        return pd.DataFrame(columns=["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","Mes","FechaRadicacion","FechaMovimiento","Observaciones"])
 
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
-    """Guarda local (lock + atómico), verifica y sincroniza a GitHub si está configurado."""
-    # ---- Lock simple ----
-    t0 = time.time()
-    while True:
-        try:
-            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd); break
-        except FileExistsError:
-            if time.time() - t0 > 10:
-                return False, "Inventario en uso por otro usuario (timeout)"
-            time.sleep(0.3)
+    """
+    Guarda TODO el DataFrame en Google Sheets (sobrescribe la hoja).
+    Para 5.000 filas funciona bien. Invalida caché y verifica la factura si se indica.
+    """
     try:
-        # ---- Escritura atómica local ----
-        dir_dest = os.path.dirname(INVENTARIO_FILE) or "."
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=dir_dest, delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            with pd.ExcelWriter(tmp_path, engine="openpyxl") as w:
-                df.to_excel(w, index=False)
-            os.replace(tmp_path, INVENTARIO_FILE)
-        finally:
-            try: os.remove(tmp_path)
-            except: pass
+        # Orden estándar: última modificación primero (opcional)
+        if "FechaMovimiento" in df.columns:
+            try:
+                df = df.sort_values("FechaMovimiento", ascending=False)
+            except Exception:
+                pass
 
+        # Convertir fechas a string ISO para Sheets
+        df_to_write = df.copy()
+        for c in ["FechaRadicacion","FechaMovimiento"]:
+            if c in df_to_write.columns:
+                df_to_write[c] = pd.to_datetime(df_to_write[c], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        ws = _open_worksheet()
+        # Borramos y reescribimos encabezados + datos
+        ws.clear()
+        set_with_dataframe(ws, df_to_write, include_index=False, include_column_header=True, resize=True)
+
+        # Invalida caché para que todos vean cambios
         st.cache_data.clear()
 
-        # ---- Verificar lectura ----
-        try:
-            df_disk = pd.read_excel(INVENTARIO_FILE)
-        except Exception as e:
-            return False, f"Guardó local pero no pude verificar: {e}"
+        # Verificar presencia de factura si se pidió
         if factura_verificar:
-            ok_row = df_disk["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
+            df_new = load_data()
+            ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
             if not ok_row:
-                return False, f"Guardó local, pero la factura {factura_verificar} no aparece al releer"
+                return False, f"Guardó en Sheets, pero la factura {factura_verificar} no aparece al releer"
 
-        # ---- GitHub opcional ----
-        if github_enabled():
-            try:
-                with open(INVENTARIO_FILE, "rb") as f:
-                    content_bytes = f.read()
-                tries = 0
-                while tries < 3:
-                    tries += 1
-                    try:
-                        sha = gh_get_file_sha()
-                        gh_put_file(content_bytes, message=f"Update inventario (Factura {factura_verificar or ''})", sha=sha)
-                        return True, "OK_GITHUB"
-                    except RuntimeError as e:
-                        if "sha" in str(e).lower() or "409" in str(e):
-                            time.sleep(0.8); continue
-                        return True, f"OK_LOCAL_GH_FAIL: {e}"
-            except Exception as e:
-                return True, f"OK_LOCAL_GH_FAIL: {e}"
-        # si no hay secrets:
-        return True, "OK_LOCAL"
-    finally:
-        try: os.remove(LOCK_FILE)
-        except FileNotFoundError: pass
+        return True, "OK_SHEETS"
+    except Exception as e:
+        return False, f"Error guardando en Google Sheets: {e}"
 
 # ===== Auth (login con form y keys únicas) =====
 def login():
@@ -168,7 +142,7 @@ def login():
             else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
-            st.sidebar.error(f"Error cargando usuarios: {e}")
+            st.sidebar.error(f"Error cargando usuarios: {e}\n\nSi no usas login, comenta esta sección y deja `autenticado=True` por defecto.")
 
 # ===== App =====
 def main_app():
@@ -178,7 +152,7 @@ def main_app():
         st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
     df = load_data()
-    # Normalización de estados (solo para vista)
+    # Normalización de estados (solo vista)
     df_view = df.copy()
     if "Estado" in df_view.columns:
         norm = df_view["Estado"].astype(str).str.strip().str.lower()
@@ -290,25 +264,19 @@ def main_app():
                                key="dl_dashboard")
 
             with st.expander("🧪 Diagnóstico de inventario"):
-                st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
-                st.caption(f"🛠️ GitHub configurado: {'Sí' if github_enabled() else 'No'}")
+                st.caption("📄 Origen de datos: **Google Sheets**")
+                st.code(f"Spreadsheet: {st.secrets['googlesheets']['spreadsheet_name']}\nWorksheet:   {st.secrets['googlesheets']['worksheet_name']}", language="bash")
                 c1, c2 = st.columns(2)
-                if c1.button("🔄 Forzar recarga desde disco"):
+                if c1.button("🔄 Forzar recarga desde Sheets"):
                     st.cache_data.clear(); st.rerun()
-                if github_enabled() and c2.button("Probar conexión a GitHub"):
-                    try:
-                        sha = gh_get_file_sha()
-                        st.success(f"Conexión OK. SHA actual: {sha or 'nuevo archivo'}")
-                    except Exception as e:
-                        st.error(f"Fallo conexión GitHub: {e}")
                 qn = st.text_input("🔍 Ver factura por número:")
                 if qn:
                     try:
-                        ddf = pd.read_excel(INVENTARIO_FILE)
+                        ddf = load_data()
                         st.dataframe(ddf[ddf["NumeroFactura"].astype(str).str.strip()==qn.strip()].tail(1),
                                      use_container_width=True)
                     except Exception as e:
-                        st.error(f"No pude leer el archivo: {e}")
+                        st.error(f"No pude leer datos: {e}")
 
     # ===== Bandejas =====
     with tab_bandejas:
@@ -381,8 +349,7 @@ def main_app():
                             df.at[idx, "FechaMovimiento"] = ahora
                         ok, msg = guardar_inventario(df)
                         if ok:
-                            tag = "(sincronizado con GitHub)" if msg=="OK_GITHUB" else "(guardado local)"
-                            if str(msg).startswith("OK_LOCAL_GH_FAIL"): tag = "(guardado local; GitHub no disponible)"
+                            tag = "(guardado en Google Sheets)" if msg=="OK_SHEETS" else "(guardado local)"
                             flash_success(f"✅ Cambios guardados — {len(seleccionados)} facturas movidas a {nuevo_estado} {tag}")
                             st.rerun()
                         else:
@@ -466,6 +433,7 @@ def main_app():
                     estado_cambio = (estado_actual != estado_anterior) or (not existe2)
                     fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
 
+                    # ID: conservar si existe, o generar CHIA-####
                     if existe2 and "ID" in df.columns and pd.notna(df.loc[idx2,"ID"]) and str(df.loc[idx2,"ID"]).strip():
                         new_id = str(df.loc[idx2,"ID"]).strip()
                     else:
@@ -497,8 +465,7 @@ def main_app():
 
                     ok, msg = guardar_inventario(df, factura_verificar=registro["NumeroFactura"])
                     if ok:
-                        tag = "(sincronizado con GitHub)" if msg=="OK_GITHUB" else "(guardado local)"
-                        if str(msg).startswith("OK_LOCAL_GH_FAIL"): tag = "(guardado local; GitHub no disponible)"
+                        tag = "(guardado en Google Sheets)" if msg=="OK_SHEETS" else "(guardado local)"
                         flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} {tag}")
                         st.session_state["factura_activa"] = ""
                         st.rerun()
@@ -541,7 +508,7 @@ def main_app():
                 ).reset_index().fillna(0)
                 return g.sort_values("Cuentas", ascending=False)
 
-            # Exportador Excel según selección
+            # Exportador Excel (del reporte mostrado)
             def exportar_excel(df_tab: pd.DataFrame, sheet_name: str, extra_sheets: dict | None = None) -> bytes:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as w:
@@ -554,113 +521,81 @@ def main_app():
             # ====== POR EPS ======
             if tipo == "Por EPS":
                 tabla = agg_eps(df)
-
                 st.markdown("### 🏥 Tabla por EPS")
                 st.dataframe(tabla, use_container_width=True, key="tabla_por_eps")
 
                 c1, c2 = st.columns(2)
-                # Embudo: cantidad y %
                 total_cnt = int(tabla["Cuentas"].sum())
                 tabla_plot = tabla.copy()
                 tabla_plot["%"] = (tabla_plot["Cuentas"]/total_cnt*100).round(1) if total_cnt else 0
                 with c1:
-                    fig_funnel = px.funnel(
-                        tabla_plot.head(25),
-                        x="Cuentas", y="EPS",
-                        title="Cantidad y % por EPS"
-                    )
-                    fig_funnel.update_traces(
-                        text=tabla_plot.head(25).apply(lambda r: f"{int(r['Cuentas'])} ({r['%']}%)", axis=1),
-                        textposition="inside"
-                    )
+                    fig_funnel = px.funnel(tabla_plot.head(25), x="Cuentas", y="EPS", title="Cantidad y % por EPS")
+                    fig_funnel.update_traces(text=tabla_plot.head(25).apply(lambda r: f"{int(r['Cuentas'])} ({r['%']}%)", axis=1),
+                                             textposition="inside")
                     st.plotly_chart(fig_funnel, use_container_width=True, key="rep_eps_funnel")
-                # Barras: valor radicado (solo Radicadas)
                 with c2:
                     df_rad = df[df["Estado"]=="Radicada"].copy()
                     g_val = df_rad.groupby("EPS", dropna=False)["Valor"].sum().reset_index(name="Valor Radicado")
                     g_val = g_val.sort_values("Valor Radicado", ascending=False)
-                    fig_val = px.bar(
-                        g_val, x="EPS", y="Valor Radicado",
-                        title="Valor radicado por EPS",
-                        text_auto=".2s"
-                    )
+                    fig_val = px.bar(g_val, x="EPS", y="Valor Radicado", title="Valor radicado por EPS", text_auto=".2s")
                     fig_val.update_layout(xaxis={'categoryorder':'total descending'})
                     st.plotly_chart(fig_val, use_container_width=True, key="rep_eps_val")
 
-                st.download_button(
-                    "⬇️ Descargar reporte EPS (Excel)",
-                    data=exportar_excel(tabla, "Por_EPS"),
-                    file_name="reporte_por_eps.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_rep_eps"
-                )
+                st.download_button("⬇️ Descargar reporte EPS (Excel)",
+                                   data=exportar_excel(tabla, "Por_EPS"),
+                                   file_name="reporte_por_eps.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, key="dl_rep_eps")
 
             # ====== POR VIGENCIA ======
             elif tipo == "Por Vigencia":
                 tabla = agg_vig(df)
-
                 st.markdown("### 📆 Tabla por Vigencia")
                 st.dataframe(tabla, use_container_width=True, key="tabla_por_vigencia")
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_vig_val = px.bar(
-                        df, x="Vigencia", y="Valor", color="Estado",
-                        title="Valor por Vigencia (por Estado)",
-                        barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
-                    )
+                    fig_vig_val = px.bar(df, x="Vigencia", y="Valor", color="Estado",
+                                         title="Valor por Vigencia (por Estado)",
+                                         barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s")
                     st.plotly_chart(fig_vig_val, use_container_width=True, key="rep_vig_val")
                 with c2:
                     g_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cuentas")
-                    fig_vig_donut = px.pie(
-                        g_cnt, names="Vigencia", values="Cuentas",
-                        hole=0.45, title="Distribución de Cuentas por Vigencia"
-                    )
+                    fig_vig_donut = px.pie(g_cnt, names="Vigencia", values="Cuentas",
+                                           hole=0.45, title="Distribución de Cuentas por Vigencia")
                     fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
                     st.plotly_chart(fig_vig_donut, use_container_width=True, key="rep_vig_donut")
 
-                st.download_button(
-                    "⬇️ Descargar reporte Vigencia (Excel)",
-                    data=exportar_excel(tabla, "Por_Vigencia"),
-                    file_name="reporte_por_vigencia.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_rep_vig"
-                )
+                st.download_button("⬇️ Descargar reporte Vigencia (Excel)",
+                                   data=exportar_excel(tabla, "Por_Vigencia"),
+                                   file_name="reporte_por_vigencia.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, key="dl_rep_vig")
 
             # ====== POR ESTADO ======
-            else:  # "Por Estado"
+            else:
                 tabla = agg_estado(df)
-
                 st.markdown("### 🧩 Tabla por Estado")
                 st.dataframe(tabla, use_container_width=True, key="tabla_por_estado")
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_estado = px.pie(
-                        tabla, names="Estado", values="Cuentas",
-                        hole=0.5, title="Distribución por Estado",
-                        color="Estado", color_discrete_map=ESTADO_COLORES
-                    )
+                    fig_estado = px.pie(tabla, names="Estado", values="Cuentas",
+                                        hole=0.5, title="Distribución por Estado",
+                                        color="Estado", color_discrete_map=ESTADO_COLORES)
                     fig_estado.update_traces(textposition="inside", textinfo="percent+value")
                     st.plotly_chart(fig_estado, use_container_width=True, key="rep_estado_pie")
                 with c2:
-                    fig_bar = px.bar(
-                        tabla, x="Estado", y="Cuentas",
-                        title="Cuentas por Estado", text_auto=True,
-                        color="Estado", color_discrete_map=ESTADO_COLORES
-                    )
+                    fig_bar = px.bar(tabla, x="Estado", y="Cuentas",
+                                     title="Cuentas por Estado", text_auto=True,
+                                     color="Estado", color_discrete_map=ESTADO_COLORES)
                     st.plotly_chart(fig_bar, use_container_width=True, key="rep_estado_bar")
 
-                st.download_button(
-                    "⬇️ Descargar reporte Estado (Excel)",
-                    data=exportar_excel(tabla, "Por_Estado"),
-                    file_name="reporte_por_estado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_rep_estado"
-                )
+                st.download_button("⬇️ Descargar reporte Estado (Excel)",
+                                   data=exportar_excel(tabla, "Por_Estado"),
+                                   file_name="reporte_por_estado.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, key="dl_rep_estado")
 
     # ===== Avance =====
     with tab_avance:
@@ -725,6 +660,7 @@ if st.session_state.get("autenticado", False):
     main_app()
 else:
     login()
+
 
 
 
