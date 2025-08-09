@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 04:40 (no-touch inventory on load)"
+APP_VERSION = "2025-08-09 05:15 (safe-view, NA fix)"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
@@ -16,7 +16,7 @@ import streamlit.components.v1 as components
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
 USUARIOS_FILE   = "usuarios.xlsx"
 
-# Colores por estado (solo para visual)
+# Colores por estado (solo para gráficos)
 ESTADO_COLORES = {
     "Radicada": "green",
     "Pendiente": "red",
@@ -24,8 +24,8 @@ ESTADO_COLORES = {
     "Subsanada": "blue",
 }
 
-# Estados conocidos (NO se usan para reescribir datos, solo para ordenar/colorear)
-ESTADOS_CONOCIDOS = ["Pendiente","Auditada","Subsanada","Radicada"]
+# Lista de pestañas de estado para bandejas (no se usa para escribir)
+ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
 
 MES_NOMBRE = {
     1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -34,22 +34,41 @@ MES_NOMBRE = {
 
 # ====== Helpers ======
 def _to_ts(d):
-    """Convierte date/datetime/str a Timestamp o NaT (sin escribir a archivo)."""
-    return pd.to_datetime(d, errors="coerce") if d not in (None, "", pd.NaT) else pd.NaT
+    """Convierte date/datetime/str a Timestamp o NaT de forma segura."""
+    try:
+        return pd.to_datetime(d, errors="coerce")
+    except Exception:
+        return pd.NaT
 
-def _estado_norm(s):
-    """Normaliza SOLO PARA VISUALIZAR/FILTRAR. Nunca se escribe al inventario."""
-    if pd.isna(s): return "Desconocido"
-    t = str(s).strip()
-    return t
+def guardar_inventario(df: pd.DataFrame):
+    """Guarda DataFrame al Excel. SOLO se llama en Gestión o movimientos masivos."""
+    try:
+        with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
+            df.to_excel(w, index=False)
+    except Exception:
+        # Fallback: CSV si no puede escribir xlsx
+        df.to_csv("inventario_cuentas.csv", index=False, encoding="utf-8-sig")
+    st.cache_data.clear()
 
-def _build_estado_color_map(unique_estados):
-    cmap = ESTADO_COLORES.copy()
-    # Estados no mapeados: asignar color por defecto
-    for e in unique_estados:
-        if e not in cmap:
-            cmap[e] = "#777777"
-    return cmap
+def _id_num(id_str):
+    s = str(id_str).strip()
+    m = re.match(r"^CHIA-(\d+)$", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+def siguiente_id(df: pd.DataFrame):
+    if "ID" not in df.columns or df["ID"].dropna().empty:
+        return "CHIA-0001"
+    nums = df["ID"].apply(_id_num).dropna()
+    n = int(nums.max()) + 1 if not nums.empty else 1
+    return f"CHIA-{n:04d}"
 
 def _set_query_params(**kwargs):
     try:
@@ -71,57 +90,43 @@ def _select_tab(label: str):
     """
     components.html(js, height=0, scrolling=False)
 
-# ====== DATA (solo lectura) ======
+# ====== DATA (LOAD WITHOUT MUTATION) ======
 @st.cache_data
 def load_data():
-    """Carga el inventario SIN modificarlo ni normalizarlo destructivamente."""
     if not os.path.exists(INVENTARIO_FILE):
-        # Estructura vacía si no existe
-        cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
-                "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
-        return pd.DataFrame(columns=cols)
-
-    df = pd.read_excel(INVENTARIO_FILE)
-    # Convertir fechas a datetime SOLO en una copia en memoria (no se guarda)
+        # No crear columnas ni tocar datos; devolver DF vacío
+        return pd.DataFrame()
+    try:
+        df = pd.read_excel(INVENTARIO_FILE)
+    except Exception:
+        # Si no se puede leer, devolver DF vacío (no inventar estructura)
+        return pd.DataFrame()
+    # NO normalizar ni corregir datos aquí
+    # Convertir fechas a datetime de forma no destructiva para cálculos (no se guarda)
     for col in ["FechaRadicacion", "FechaMovimiento"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
-    # No forzamos tipos ni rellenamos valores en el archivo; solo trabajamos con df en memoria
     return df
 
-# ====== Guardado explícito (solo cuando el usuario lo pide) ======
-def guardar_inventario(df: pd.DataFrame):
-    """Guarda EXPLÍCITAMENTE al Excel. Esta es la ÚNICA función que escribe al archivo."""
-    with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
-    st.cache_data.clear()
-
-def registro_por_factura(df: pd.DataFrame, numero_factura: str):
-    """Devuelve (existe, idx, fila_series) según NumeroFactura (sin modificar)."""
-    if "NumeroFactura" not in df.columns:
-        return False, None, None
-    mask = df["NumeroFactura"].astype(str).str.strip() == str(numero_factura).strip()
-    if mask.any():
-        idx = df[mask].index[0]
-        return True, idx, df.loc[idx]
-    return False, None, None
-
-def siguiente_id(df: pd.DataFrame):
-    """Genera siguiente ID con patrón CHIA-#### sin alterar datos existentes."""
-    def _id_num(id_str):
-        s = str(id_str).strip()
-        m = re.match(r"^CHIA-(\d+)$", s)
-        if m:
-            try: return int(m.group(1))
-            except: return None
-        try: return int(float(s))
-        except: return None
-
-    if "ID" not in df.columns or df["ID"].dropna().empty:
-        return "CHIA-0001"
-    nums = df["ID"].apply(_id_num).dropna()
-    n = int(nums.max()) + 1 if not nums.empty else 1
-    return f"CHIA-{n:04d}"
+def build_view(df: pd.DataFrame) -> pd.DataFrame:
+    """Crea una vista en memoria con columnas auxiliares para visualizar/filtrar sin tocar df."""
+    view = df.copy()
+    # Normalización NO destructiva de estado
+    if "Estado" in view.columns:
+        norm = view["Estado"].astype(str).str.strip().str.lower()
+        mapa = {
+            "radicada": "Radicada",
+            "radicadas": "Radicada",
+            "pendiente": "Pendiente",
+            "auditada": "Auditada",
+            "auditadas": "Auditada",
+            "subsanada": "Subsanada",
+            "subsanadas": "Subsanada",
+        }
+        view["EstadoCanon"] = norm.map(mapa).fillna(view["Estado"])
+    else:
+        view["EstadoCanon"] = "Pendiente"
+    return view
 
 # ====== Auth ======
 def login():
@@ -134,53 +139,53 @@ def login():
             ok = users[(users["Cedula"] == cedula) & (users["Contrasena"] == contrasena)]
             if not ok.empty:
                 st.session_state["autenticado"] = True
-                st.session_state["usuario"] = ok.iloc[0]["Cedula"]
-                st.session_state["rol"] = ok.iloc[0]["Rol"]
+                st.session_state["usuario"] = ok.iloc[0].get("Cedula","")
+                st.session_state["rol"] = ok.iloc[0].get("Rol","")
                 st.rerun()
             else:
                 st.sidebar.warning("Datos incorrectos")
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
 
-# ====== Filtros / Bandejas (sin tocar archivo) ======
-def filtrar_por_estado(df: pd.DataFrame, estado: str, eps: str, vigencia, q: str):
-    # Usar EstadoNorm para comparar
-    dfv = df.copy()
-    dfv["EstadoNorm"] = dfv["Estado"].apply(_estado_norm)
-    sub = dfv[dfv["EstadoNorm"] == estado].copy()
-    if eps and eps != "Todos":
+# ====== Bandejas Helpers ======
+def filtrar_por_estado_view(df_view: pd.DataFrame, estado_canon: str, eps: str, vigencia, q: str):
+    sub = df_view[df_view["EstadoCanon"] == estado_canon].copy()
+    if eps and eps != "Todos" and "EPS" in sub.columns:
         sub = sub[sub["EPS"].astype(str) == eps]
-    if vigencia and vigencia != "Todos":
+    if vigencia and vigencia != "Todos" and "Vigencia" in sub.columns:
         sub = sub[sub["Vigencia"].astype(str) == str(vigencia)]
-    if q:
+    if q and "NumeroFactura" in sub.columns:
         qn = str(q).strip().lower()
         sub = sub[sub["NumeroFactura"].astype(str).str.lower().str.contains(qn)]
     return sub
 
+def paginar(df: pd.DataFrame, page: int, per_page: int):
+    total = len(df)
+    total_pages = max((total - 1) // per_page + 1, 1)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    return df.iloc[start:end], total_pages, page
+
 def aplicar_movimiento_masivo(df: pd.DataFrame, indices, nuevo_estado: str):
-    """Esta acción SÍ modifica archivo porque es un comando explícito del usuario."""
+    """Actualiza estados SOLO cuando el usuario lo pide explícitamente desde Bandejas."""
     ahora = pd.Timestamp(datetime.now())
     for idx in indices:
         if "Estado" in df.columns:
             df.at[idx, "Estado"] = nuevo_estado
-        # Reglas de fechas derivadas (opcionales)
         if nuevo_estado == "Radicada" and "FechaRadicacion" in df.columns and pd.isna(df.at[idx, "FechaRadicacion"]):
             df.at[idx, "FechaRadicacion"] = ahora.normalize()
-            if "Mes" in df.columns:
-                df.at[idx, "Mes"] = f"{MES_NOMBRE.get(ahora.month,'')}"  # solo nombre, no pisa si no existe
         if "FechaMovimiento" in df.columns:
             df.at[idx, "FechaMovimiento"] = ahora
     guardar_inventario(df)
 
 # ====== Export helpers (Excel) ======
-def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
+def exportar_dashboard_excel(df_view: pd.DataFrame) -> bytes:
     output = io.BytesIO()
-    dfv = df.copy()
-    dfv["EstadoNorm"] = dfv["Estado"].apply(_estado_norm)
-
-    total = len(dfv)
-    radicadas = int((dfv["EstadoNorm"] == "Radicada").sum())
-    total_valor = float(pd.to_numeric(dfv.get("Valor", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    # Métricas generales
+    total = len(df_view)
+    total_valor = float(df_view["Valor"].fillna(0).sum()) if "Valor" in df_view.columns else 0.0
+    radicadas = int((df_view["EstadoCanon"] == "Radicada").sum())
     avance = round((radicadas / total) * 100, 2) if total else 0.0
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -189,29 +194,32 @@ def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
             "Valor": [total, total_valor, avance]
         }).to_excel(writer, index=False, sheet_name="Resumen")
 
-        if {"EPS","NumeroFactura"}.issubset(dfv.columns):
-            g_eps = dfv.groupby("EPS", dropna=False).agg(
+        # EPS
+        if {"EPS","NumeroFactura"}.issubset(df_view.columns):
+            g_eps = df_view.groupby("EPS", dropna=False).agg(
                 N_Facturas=("NumeroFactura","count"),
-                Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
+                Valor_Total=("Valor", "sum"),
+                Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
             ).fillna(0)
             g_eps["% Avance"] = (g_eps["Radicadas"] / g_eps["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_eps.to_excel(writer, sheet_name="Por_EPS")
 
-        if {"Mes","NumeroFactura"}.issubset(dfv.columns):
-            g_mes = dfv.groupby("Mes", dropna=False).agg(
+        # Mes
+        if {"Mes","NumeroFactura"}.issubset(df_view.columns):
+            g_mes = df_view.groupby("Mes", dropna=False).agg(
                 N_Facturas=("NumeroFactura","count"),
-                Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
+                Valor_Total=("Valor","sum"),
+                Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
             ).fillna(0)
             g_mes["% Avance"] = (g_mes["Radicadas"] / g_mes["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_mes.to_excel(writer, sheet_name="Por_Mes")
 
-        if {"Vigencia","NumeroFactura"}.issubset(dfv.columns):
-            g_vig = dfv.groupby("Vigencia", dropna=False).agg(
+        # Vigencia
+        if {"Vigencia","NumeroFactura"}.issubset(df_view.columns):
+            g_vig = df_view.groupby("Vigencia", dropna=False).agg(
                 N_Facturas=("NumeroFactura","count"),
-                Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
+                Valor_Total=("Valor","sum"),
+                Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
             ).fillna(0)
             g_vig["% Avance"] = (g_vig["Radicadas"] / g_vig["N_Facturas"].replace(0, float("nan")) * 100).fillna(0).round(2)
             g_vig.to_excel(writer, sheet_name="Por_Vigencia")
@@ -220,33 +228,27 @@ def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
 # ====== APP ======
 def main_app():
     st.caption(f"🆔 Versión: {APP_VERSION}")
-    st.title("📊 AIPAD • Control de Radicación (modo seguro: no toca inventario al cargar)")
+    st.title("📊 AIPAD • Control de Radicación")
     if "usuario" in st.session_state and "rol" in st.session_state:
         st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
-    qp = {}
-    try:
-        qp = dict(st.query_params)
-    except Exception:
-        qp = st.experimental_get_query_params()
-
+    # Cargar datos (sin tocar archivo) y construir vista segura
     df = load_data()
-    dfv = df.copy()  # vista en memoria
-    dfv["EstadoNorm"] = dfv["Estado"].apply(_estado_norm)
-    color_map = _build_estado_color_map(sorted(dfv["EstadoNorm"].dropna().unique()))
+    df_view = build_view(df)
 
+    # Tabs
     tab_labels = ["📋 Dashboard", "🗂️ Bandejas", "📝 Gestión", "📑 Reportes", "📈 Avance"]
     tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_labels)
 
     # ---- DASHBOARD ----
     with tab1:
         st.subheader("📈 Avance general del proyecto")
-        if dfv.empty:
+        if df_view.empty:
             st.info("No hay datos en el inventario.")
         else:
-            total = len(dfv)
-            radicadas = int((dfv["EstadoNorm"] == "Radicada").sum())
-            total_valor = float(pd.to_numeric(dfv.get("Valor", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+            total = len(df_view)
+            total_valor = float(df_view["Valor"].fillna(0).sum()) if "Valor" in df_view.columns else 0.0
+            radicadas = int((df_view["EstadoCanon"] == "Radicada").sum())
             avance = round((radicadas / total) * 100, 2) if total else 0.0
 
             c1, c2, c3 = st.columns(3)
@@ -254,93 +256,94 @@ def main_app():
             c2.metric("💰 Valor total", f"${total_valor:,.0f}")
             c3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-            # Distribución por Estado (donut)
-            if "EstadoNorm" in dfv.columns:
-                fig_estado = px.pie(
-                    dfv, names="EstadoNorm", hole=0.4, title="Distribución por Estado",
-                    color="EstadoNorm", color_discrete_map=color_map
-                )
-                fig_estado.update_traces(textposition="inside", textinfo="percent+value")
-                st.plotly_chart(fig_estado, use_container_width=True)
+            # Distribución por Estado (donut) usando EstadoCanon
+            fig_estado = px.pie(
+                df_view, names="EstadoCanon", hole=0.4, title="Distribución por Estado",
+                color="EstadoCanon", color_discrete_map=ESTADO_COLORES
+            )
+            fig_estado.update_traces(textposition="inside", textinfo="percent+value")
+            st.plotly_chart(fig_estado, use_container_width=True)
 
             # --- EPS ---
             st.markdown("## 🏥 Por EPS")
-            if {"EPS","NumeroFactura"}.issubset(dfv.columns):
-                g = dfv.groupby("EPS", dropna=False).agg(
+            if {"EPS","NumeroFactura"}.issubset(df_view.columns):
+                # Métricas por EPS
+                g = df_view.groupby("EPS", dropna=False).agg(
                     N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                    Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
-                ).fillna(0).sort_values("N_Facturas", ascending=False)
-
-                # Embudo único: cantidad y % por EPS
-                top = g.reset_index().head(25)
-                top["Porcentaje"] = (top["N_Facturas"] / top["N_Facturas"].sum() * 100).round(2) if top["N_Facturas"].sum() else 0
-                fig_funnel = px.funnel(top, x="N_Facturas", y="EPS", title="Cantidad y % por EPS")
-                fig_funnel.update_traces(text=top["Porcentaje"].astype(str) + "%", textposition="inside")
-                st.plotly_chart(fig_funnel, use_container_width=True)
-
-                # NUEVO: columnas Valor radicado por EPS (solo Radicadas)
-                df_rad = dfv[dfv["EstadoNorm"]=="Radicada"].copy()
-                if {"EPS","Valor"}.issubset(df_rad.columns):
-                    g_val_rad = df_rad.groupby("EPS", dropna=False)["Valor"].apply(lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()).reset_index(name="ValorRadicado")
-                    g_val_rad = g_val_rad.sort_values("ValorRadicado", ascending=False)
-                    fig_val_rad = px.bar(g_val_rad, x="EPS", y="ValorRadicado",
-                                         title="Valor radicado por EPS (solo Radicadas)", text_auto=".2s")
-                    fig_val_rad.update_layout(xaxis={'categoryorder':'total descending'})
-                    st.plotly_chart(fig_val_rad, use_container_width=True)
-
-            # --- Mes ---
-            st.markdown("## 📅 Por Mes")
-            if {"Mes","NumeroFactura"}.issubset(dfv.columns):
-                g = dfv.groupby("Mes", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                    Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
+                    Valor_Total=("Valor", "sum"),
+                    Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
+                ).reset_index().fillna(0)
                 g["% Avance"] = (g["Radicadas"].astype(float)/g["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
 
                 c1, c2 = st.columns(2)
                 with c1:
+                    # Embudo por # de facturas (Top 25) con cantidad (x) y % (texto)
+                    g_sorted = g.sort_values("N_Facturas", ascending=False).head(25)
+                    fig_funnel = px.funnel(g_sorted, x="N_Facturas", y="EPS", title="Cantidad y % por EPS")
+                    # Añadir porcentaje como texto al lado del valor
+                    fig_funnel.update_traces(text=g_sorted["% Avance"].astype(str) + "%")
+                    st.plotly_chart(fig_funnel, use_container_width=True)
+
+                with c2:
+                    # Columnas de Valor radicado por EPS (solo Radicadas)
+                    if {"EstadoCanon","Valor"}.issubset(df_view.columns):
+                        df_rad = df_view[df_view["EstadoCanon"] == "Radicada"]
+                        g_val = df_rad.groupby("EPS", dropna=False)["Valor"].sum().reset_index()
+                        g_val = g_val.sort_values("Valor", ascending=False)
+                        fig_val_eps = px.bar(g_val, x="EPS", y="Valor", title="Valor radicado por EPS (solo Radicadas)", text_auto=".2s")
+                        fig_val_eps.update_layout(xaxis={'categoryorder':'total descending'})
+                        st.plotly_chart(fig_val_eps, use_container_width=True)
+
+            # --- Mes ---
+            st.markdown("## 📅 Por Mes")
+            if {"Mes","NumeroFactura"}.issubset(df_view.columns):
+                g_mes = df_view.groupby("Mes", dropna=False).agg(
+                    N_Facturas=("NumeroFactura","count"),
+                    Valor_Total=("Valor","sum"),
+                    Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
+                ).reset_index().fillna(0)
+                g_mes["% Avance"] = (g_mes["Radicadas"].astype(float)/g_mes["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
+
+                c1, c2 = st.columns(2)
+                with c1:
                     fig_mes_val = px.area(
-                        dfv, x="Mes", y="Valor", color="EstadoNorm",
-                        title="Estados por Mes", line_group="EstadoNorm",
-                        color_discrete_map=color_map
+                        df_view, x="Mes", y="Valor", color="EstadoCanon",
+                        title="Estados por Mes", line_group="EstadoCanon",
+                        color_discrete_map=ESTADO_COLORES
                     )
                     st.plotly_chart(fig_mes_val, use_container_width=True)
                 with c2:
                     fig_mes_cnt = px.bar(
-                        g.reset_index(), x="Mes", y="N_Facturas", title="Cantidad de facturas por Mes",
-                        text="N_Facturas"
+                        g_mes, x="Mes", y="N_Facturas", title="Cantidad de facturas por Mes",
                     )
                     st.plotly_chart(fig_mes_cnt, use_container_width=True)
 
             # --- Vigencia ---
             st.markdown("## 📆 Por Vigencia")
-            if {"Vigencia","NumeroFactura"}.issubset(dfv.columns):
-                g = dfv.groupby("Vigencia", dropna=False).agg(
+            if {"Vigencia","NumeroFactura"}.issubset(df_view.columns):
+                g_vig = df_view.groupby("Vigencia", dropna=False).agg(
                     N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                    Radicadas=("EstadoNorm", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g["% Avance"] = (g["Radicadas"].astype(float)/g["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
+                    Valor_Total=("Valor","sum"),
+                    Radicadas=("EstadoCanon", lambda x: (x=="Radicada").sum())
+                ).reset_index().fillna(0)
+                g_vig["% Avance"] = (g_vig["Radicadas"].astype(float)/g_vig["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
 
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_vig_val = px.bar(
-                        dfv, x="Vigencia", y="Valor", color="EstadoNorm", barmode="group",
-                        title="Valor por Vigencia", color_discrete_map=color_map, text_auto=".2s"
+                        df_view, x="Vigencia", y="Valor", color="EstadoCanon", barmode="group",
+                        title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
                     )
                     st.plotly_chart(fig_vig_val, use_container_width=True)
                 with c2:
                     fig_vig_cnt = px.bar(
-                        g.reset_index(), x="Vigencia", y="N_Facturas", title="Cantidad por Vigencia",
-                        text="N_Facturas"
+                        g_vig, x="Vigencia", y="N_Facturas", title="Cantidad por Vigencia"
                     )
                     st.plotly_chart(fig_vig_cnt, use_container_width=True)
 
-            # --- Descarga Excel Dashboard ---
+            # Descarga Excel del Dashboard
             st.divider()
-            xls_bytes = exportar_dashboard_excel(df)
+            xls_bytes = exportar_dashboard_excel(df_view)
             st.download_button(
                 "⬇️ Descargar Dashboard a Excel",
                 data=xls_bytes,
@@ -349,44 +352,45 @@ def main_app():
                 use_container_width=True
             )
 
-    # ---- BANDEJAS (usa EstadoNorm para visualizar, no escribe) ----
+    # ---- BANDEJAS ----
     with tab2:
         st.subheader("🗂️ Bandejas por estado")
-        if dfv.empty:
+        if df_view.empty:
             st.info("No hay datos para mostrar.")
         else:
-            estados_opts = sorted(dfv["EstadoNorm"].dropna().unique().tolist(), key=lambda x: (x not in ESTADOS_CONOCIDOS, x))
+            # Filtros
             fc1, fc2, fc3, fc4 = st.columns([1.2,1,1,1])
             with fc1:
                 q = st.text_input("🔎 Buscar factura (contiene)", key="bandeja_q")
             with fc2:
-                eps_opts = ["Todos"] + sorted([e for e in dfv["EPS"].dropna().astype(str).unique().tolist() if e])
+                eps_opts = ["Todos"] + sorted([e for e in df_view.get("EPS", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if e])
                 eps_sel = st.selectbox("EPS", eps_opts, index=0, key="bandeja_eps")
             with fc3:
-                vig_opts = ["Todos"] + sorted([str(int(v)) for v in pd.to_numeric(dfv.get("Vigencia", pd.Series(dtype=float)), errors="coerce").dropna().unique().tolist()])
+                vig_series = pd.to_numeric(df_view.get("Vigencia", pd.Series(dtype=float)), errors="coerce").dropna().astype(int)
+                vig_opts = ["Todos"] + sorted([str(v) for v in vig_series.unique().tolist()])
                 vig_sel = st.selectbox("Vigencia", vig_opts, index=0, key="bandeja_vig")
             with fc4:
                 per_page = st.selectbox("Filas por página", [50, 100, 200], index=1, key="bandeja_pp")
 
-            tabs_estado = st.tabs(estados_opts)
+            tabs_estado = st.tabs(ESTADOS)
 
-            def paginar(df_, page, per_page_):
-                total = len(df_)
-                total_pages = max((total - 1) // per_page_ + 1, 1)
-                page = max(1, min(page, total_pages))
-                start = (page - 1) * per_page_
-                end = start + per_page_
-                return df_.iloc[start:end], total_pages, page
-
-            for estado, tab in zip(estados_opts, tabs_estado):
+            for estado, tab in zip(ESTADOS, tabs_estado):
                 with tab:
-                    sub = filtrar_por_estado(df, estado, eps_sel, vig_sel, q)
-                    sub = sub.sort_values(by=["FechaMovimiento","NumeroFactura"], ascending=[False, True], na_position="last")
+                    sub_view = filtrar_por_estado_view(df_view, estado, eps_sel, vig_sel, q)
+                    # Orden por movimiento si existe
+                    sort_cols = [c for c in ["FechaMovimiento","NumeroFactura"] if c in sub_view.columns]
+                    if sort_cols:
+                        sub_view = sub_view.sort_values(by=sort_cols, ascending=[False, True] if len(sort_cols)==2 else False)
 
+                    # Sincronizar con df REAL para poder actualizar (usamos índice original si existe)
+                    # A falta de índice, usamos posición tras merge
+                    sub = sub_view.copy()
+                    sub["_row_index"] = sub_view.index
+
+                    # Paginación
                     pg_key = f"page_{estado}"
                     if pg_key not in st.session_state:
                         st.session_state[pg_key] = 1
-
                     sub_page, total_pages, current_page = paginar(sub, st.session_state[pg_key], per_page)
                     st.session_state[pg_key] = current_page
 
@@ -396,13 +400,13 @@ def main_app():
                     with cpc:
                         nextb = st.button("Siguiente ➡️", key=f"next_{estado}", disabled=(current_page>=total_pages))
                     with cpb:
-                        st.markdown(f"**Página {current_page} / {total_pages}** &nbsp; &nbsp; (**{len(sub)}** registros)")
-
+                        st.markdown(f"**Página {current_page} / {total_pages}** &nbsp; &nbsp; (**{len(sub_view)}** registros)")
                     if prev:
                         st.session_state[pg_key] = max(1, current_page-1); st.rerun()
                     if nextb:
                         st.session_state[pg_key] = min(total_pages, current_page+1); st.rerun()
 
+                    # Selección en página
                     st.divider()
                     sel_all_key = f"sel_all_{estado}_{current_page}"
                     sel_all = st.checkbox("Seleccionar todo (esta página)", key=sel_all_key, value=False)
@@ -410,7 +414,9 @@ def main_app():
                     cols_mostrar = [c for c in ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"] if c in sub_page.columns]
                     view = sub_page[cols_mostrar].copy()
                     view.insert(0, "Seleccionar", sel_all)
-                    view.insert(1, "__idx", sub_page.index)
+                    view.insert(1, "__idx", sub_page["_row_index"])
+
+                    column_order = [c for c in ["Seleccionar","ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones","__idx"] if c in view.columns]
 
                     edited = st.data_editor(
                         view,
@@ -421,6 +427,7 @@ def main_app():
                             "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Marca las filas a mover", default=False),
                             "__idx": st.column_config.Column("", width="small", disabled=True),
                         },
+                        column_order=column_order[:-1] if "__idx" in column_order else column_order,
                         key=f"editor_{estado}_{current_page}",
                     )
 
@@ -429,214 +436,237 @@ def main_app():
                     except Exception:
                         mask = [False] * len(sub_page)
 
-                    seleccionados = [idx for pos, idx in enumerate(sub_page.index.tolist()) if pos < len(mask) and mask[pos]]
+                    seleccionados_view_idx = [idx for pos, idx in enumerate(sub_page["_row_index"].tolist()) if pos < len(mask) and mask[pos]]
 
                     st.divider()
                     c1, c2 = st.columns([2,1])
                     with c1:
-                        nuevo_estado = st.selectbox("Mover seleccionadas a:", ESTADOS_CONOCIDOS, key=f"move_to_{estado}")
+                        nuevo_estado = st.selectbox("Mover seleccionadas a:", [e for e in ESTADOS if e != estado], key=f"move_to_{estado}")
                     with c2:
-                        mover = st.button("Aplicar movimiento", type="primary", key=f"aplicar_{estado}", disabled=(len(seleccionados)==0))
+                        mover = st.button("Aplicar movimiento", type="primary", key=f"aplicar_{estado}", disabled=(len(seleccionados_view_idx)==0))
 
                     if mover:
-                        df_editable = load_data().copy()  # recargar para escribir sobre el archivo real
-                        aplicar_movimiento_masivo(df_editable, seleccionados, nuevo_estado)
-                        st.success(f"Se movieron {len(seleccionados)} facturas a {nuevo_estado}")
-                        _set_query_params(tab="🗂️ Bandejas")
+                        # Mapear índices de la vista al df real
+                        indices_reales = seleccionados_view_idx
+                        aplicar_movimiento_masivo(df, indices_reales, nuevo_estado)
+                        st.success(f"Se movieron {len(indices_reales)} facturas de {estado} → {nuevo_estado}")
+                        _set_query_params(tab="bandejas")
                         st.rerun()
 
-    # ---- GESTIÓN (solo guarda al presionar 'Guardar cambios') ----
+    # ---- GESTIÓN ----
     with tab3:
         st.subheader("📝 Gestión")
-        df_edit = load_data().copy()
-
-        colb1, colb2 = st.columns([2,1])
-        with colb1:
-            q_factura = st.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
-        with colb2:
-            buscar = st.button("Buscar / Cargar", type="primary")
-
-        if buscar and q_factura.strip():
-            st.session_state["factura_activa"] = q_factura.strip()
-
-        numero_activo = st.session_state.get("factura_activa", "")
-
-        if not numero_activo:
-            st.info("Ingresa un número de factura y presiona **Buscar / Cargar** para editar o crear.")
+        if df.empty:
+            st.info("No hay datos de inventario.")
         else:
-            existe, idx, fila = registro_por_factura(df_edit, numero_activo)
-            st.caption(f"Factura seleccionada: **{numero_activo}** {'(existente)' if existe else '(nueva)'}")
+            # Búsqueda
+            colb1, colb2 = st.columns([2,1])
+            with colb1:
+                q_factura = st.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
+            with colb2:
+                buscar = st.button("Buscar / Cargar", type="primary")
 
-            # Valores por defecto leídos del archivo (no se guardan hasta confirmar)
-            def_val = {}
-            if existe:
-                for c in ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
-                          "FechaRadicacion","FechaMovimiento","Observaciones","Mes"]:
-                    def_val[c] = fila.get(c, pd.NA)
+            if buscar and q_factura.strip():
+                st.session_state["factura_activa"] = q_factura.strip()
+
+            numero_activo = st.session_state.get("factura_activa", "")
+
+            if not numero_activo:
+                st.info("Ingresa un número de factura y presiona **Buscar / Cargar** para editar o crear.")
             else:
-                def_val = {
-                    "ID": "",
-                    "NumeroFactura": numero_activo,
-                    "Valor": 0.0,
-                    "EPS": "",
-                    "Vigencia": date.today().year,
-                    "Estado": "Pendiente",
-                    "FechaRadicacion": pd.NaT,
-                    "FechaMovimiento": pd.NaT,
-                    "Observaciones": "",
-                    "Mes": ""
-                }
-
-            estados_opciones = sorted(set(ESTADOS_CONOCIDOS + [str(x) for x in df_edit.get("Estado", pd.Series([], dtype=str)).dropna().unique().tolist()]))
-            eps_opciones = sorted([e for e in df_edit.get("EPS", pd.Series([], dtype=str)).dropna().astype(str).unique().tolist() if e])
-            vigencias = sorted([int(v) for v in pd.to_numeric(df_edit.get("Vigencia", pd.Series(dtype=float)), errors="coerce").dropna().unique().tolist()] + [date.today().year])
-
-            ctop1, ctop2, ctop3 = st.columns(3)
-            with ctop1:
-                st.text_input("ID (automático)", value=str(def_val.get("ID") or ""), disabled=True)
-            with ctop2:
-                est_val = st.selectbox("Estado", options=estados_opciones,
-                                       index=estados_opciones.index(str(def_val.get("Estado") or "Pendiente")) if str(def_val.get("Estado") or "Pendiente") in estados_opciones else 0,
-                                       key="estado_val")
-            with ctop3:
-                frad_disabled = (est_val != "Radicada")
-                frad_default = def_val.get("FechaRadicacion")
-                frad_value = frad_default.date() if isinstance(frad_default, pd.Timestamp) and pd.notna(frad_default) else date.today()
-                frad_val = st.date_input("Fecha de Radicación", value=frad_value, disabled=frad_disabled, key="frad_val")
-
-            st.text_input("Fecha de Movimiento (automática)",
-                          value=str(def_val.get("FechaMovimiento") or ""), disabled=True)
-
-            with st.form("form_factura", clear_on_submit=False):
-                c1, c2 = st.columns(2)
-                with c1:
-                    num_val = st.text_input("Número de factura", value=str(def_val.get("NumeroFactura") or ""))
-                    valor_def = def_val.get("Valor")
-                    try: valor_def = float(valor_def) if pd.notna(valor_def) else 0.0
-                    except: valor_def = 0.0
-                    valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=valor_def)
-                    eps_val = st.selectbox("EPS", options=[""] + eps_opciones,
-                                           index=([""]+eps_opciones).index(str(def_val.get("EPS") or "")) if str(def_val.get("EPS") or "") in ([""]+eps_opciones) else 0)
-                with c2:
-                    vig_set = sorted(set(vigencias))
-                    vig_default = def_val.get("Vigencia")
-                    if pd.isna(vig_default): vig_default = date.today().year
-                    vig_val = st.selectbox("Vigencia", options=vig_set, index=vig_set.index(int(vig_default)) if int(vig_default) in vig_set else 0)
-                    obs_val = st.text_area("Observaciones", value=str(def_val.get("Observaciones") or ""), height=100)
-
-                submit = st.form_submit_button("💾 Guardar cambios", type="primary")
-
-            if submit:
-                ahora = pd.Timestamp(datetime.now())
-                estado_actual = st.session_state.get("estado_val", def_val.get("Estado") or "Pendiente")
-                frad_widget = st.session_state.get("frad_val", date.today())
-                frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else def_val.get("FechaRadicacion")
-
-                # Mes: si tienes lógica propia, no la pisamos. Solo derivamos si no hay.
-                mes_val = def_val.get("Mes")
-                if (mes_val in (None, "", pd.NA)) and pd.notna(frad_ts):
-                    mes_val = MES_NOMBRE.get(int(frad_ts.month), "")
-
-                new_id = def_val.get("ID") or ""
-                if not new_id:
-                    new_id = siguiente_id(df_edit) if not existe else def_val.get("ID")
-
-                nueva = {
-                    "ID": new_id,
-                    "NumeroFactura": str(num_val).strip(),
-                    "Valor": float(valor_val),
-                    "EPS": (eps_val or "").strip(),
-                    "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
-                    "Estado": estado_actual,
-                    "FechaRadicacion": frad_ts,
-                    "Observaciones": (obs_val or "").strip(),
-                    "Mes": mes_val
-                }
-
-                # FechaMovimiento solo si cambia estado o es nueva
-                estado_anterior = str(def_val.get("Estado") or "")
-                estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
-                nueva["FechaMovimiento"] = (pd.Timestamp(datetime.now()) if estado_cambio else def_val.get("FechaMovimiento"))
-
-                if existe:
-                    for k, v in nueva.items():
-                        df_edit.at[idx, k] = v
+                # Localizar por NumeroFactura (exacto)
+                if "NumeroFactura" in df.columns:
+                    mask = df["NumeroFactura"].astype(str).str.strip() == str(numero_activo).strip()
+                    existe = bool(mask.any())
+                    idx = df[mask].index[0] if existe else None
+                    fila = df.loc[idx] if existe else pd.Series(dtype="object")
                 else:
-                    df_edit = pd.concat([df_edit, pd.DataFrame([nueva])], ignore_index=True)
+                    existe, idx, fila = False, None, pd.Series(dtype="object")
 
-                try:
-                    guardar_inventario(df_edit)  # Único punto donde se escribe al archivo
-                    st.success("✅ Cambios guardados.")
-                    st.session_state["factura_activa"] = ""
-                    for k in ["estado_val", "frad_val", "buscar_factura_input"]:
-                        if k in st.session_state: del st.session_state[k]
-                    _set_query_params(tab="📝 Gestión")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error guardando el inventario: {e}")
+                st.caption(f"Factura seleccionada: **{numero_activo}** {'(existente)' if existe else '(nueva)'}")
+
+                # Valores por defecto NO alteran df
+                def _get(row, col, fallback):
+                    try:
+                        v = row.get(col, fallback)
+                        return v if not (isinstance(v, float) and pd.isna(v)) else fallback
+                    except Exception:
+                        return fallback
+
+                def_val = {
+                    "ID": _get(fila, "ID", "" if not existe else "" if pd.isna(fila.get("ID", pd.NA)) else str(fila.get("ID"))),
+                    "NumeroFactura": numero_activo,
+                    "Valor": float(_get(fila, "Valor", 0.0) or 0.0),
+                    "EPS": str(_get(fila, "EPS", "")),
+                    "Vigencia": int(_get(fila, "Vigencia", date.today().year)) if str(_get(fila, "Vigencia", "")).isdigit() else date.today().year,
+                    "Estado": str(_get(fila, "Estado", "Pendiente")),
+                    "FechaRadicacion": _to_ts(_get(fila, "FechaRadicacion", pd.NaT)),
+                    "FechaMovimiento": _to_ts(_get(fila, "FechaMovimiento", pd.NaT)),
+                    "Observaciones": str(_get(fila, "Observaciones", "")),
+                    "Mes": str(_get(fila, "Mes", "")),
+                }
+
+                ctop1, ctop2, ctop3 = st.columns(3)
+                with ctop1:
+                    st.text_input("ID (automático)", value=def_val["ID"] or "", disabled=True)
+                with ctop2:
+                    estados_opciones = ESTADOS  # no normalizamos aquí
+                    try:
+                        init_idx = estados_opciones.index(def_val["Estado"]) if def_val["Estado"] in estados_opciones else 0
+                    except Exception:
+                        init_idx = 0
+                    est_val = st.selectbox("Estado", options=estados_opciones, index=init_idx, key="estado_val")
+                with ctop3:
+                    frad_disabled = (est_val != "Radicada")
+                    # Si def_val["FechaRadicacion"] es NaT o None, usar hoy como valor por defecto, pero no escribirlo automáticamente
+                    frad_default = def_val["FechaRadicacion"]
+                    if pd.isna(frad_default):
+                        frad_default = date.today()
+                    else:
+                        try:
+                            frad_default = frad_default.date()
+                        except Exception:
+                            frad_default = date.today()
+                    frad_val = st.date_input("Fecha de Radicación", value=frad_default, disabled=frad_disabled, key="frad_val")
+
+                st.text_input(
+                    "Fecha de Movimiento (automática)",
+                    value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
+                    disabled=True
+                )
+
+                with st.form("form_factura", clear_on_submit=False):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        num_val = st.text_input("Número de factura", value=def_val["NumeroFactura"])
+                        valor_val = st.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
+                        eps_val = st.text_input("EPS", value=def_val["EPS"])
+                    with c2:
+                        vig_val = st.number_input("Vigencia", step=1, value=int(def_val["Vigencia"]))
+                        obs_val = st.text_area("Observaciones", value=def_val["Observaciones"], height=100)
+
+                    submit = st.form_submit_button("💾 Guardar cambios", type="primary")
+
+                if submit:
+                    ahora = pd.Timestamp(datetime.now())
+
+                    estado_actual = st.session_state.get("estado_val", def_val["Estado"])
+                    frad_widget = st.session_state.get("frad_val", None)
+                    frad_ts = _to_ts(frad_widget) if (estado_actual == "Radicada") else pd.NaT
+
+                    # NO tocar 'Mes' automáticamente salvo que esté vacío y tengamos FechaRadicación válida
+                    mes_val = def_val["Mes"]
+                    is_mes_vacio = (mes_val is None) or pd.isna(mes_val) or (str(mes_val).strip() == "")
+                    if is_mes_vacio and pd.notna(frad_ts):
+                        mes_val = MES_NOMBRE.get(int(frad_ts.month), "")
+
+                    nueva = {
+                        "ID": def_val["ID"] or (siguiente_id(df) if not existe else def_val["ID"]),
+                        "NumeroFactura": str(num_val).strip(),
+                        "Valor": float(valor_val),
+                        "EPS": str(eps_val).strip(),
+                        "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
+                        "Estado": estado_actual,
+                        "FechaRadicacion": frad_ts if (estado_actual == "Radicada") else def_val["FechaRadicacion"],
+                        "Observaciones": str(obs_val).strip(),
+                        "Mes": mes_val,
+                        # FechaMovimiento SOLO cuando cambia el estado o si es nueva
+                        "FechaMovimiento": ahora if (not existe or estado_actual != def_val["Estado"]) else def_val["FechaMovimiento"],
+                    }
+
+                    # Insertar/actualizar
+                    if existe:
+                        for k, v in nueva.items():
+                            df.at[idx, k] = v
+                    else:
+                        # Si el archivo está vacío, crear columnas a partir de 'nueva'
+                        if df.empty:
+                            df = pd.DataFrame([nueva])
+                        else:
+                            df = pd.concat([df, pd.DataFrame([nueva])], ignore_index=True)
+
+                    try:
+                        guardar_inventario(df)
+                        st.success("✅ Cambios guardados.")
+                        # Mantenerse en Gestión
+                        st.session_state["factura_activa"] = ""
+                        for k in ["estado_val", "frad_val", "buscar_factura_input"]:
+                            if k in st.session_state:
+                                del st.session_state[k]
+                        _set_query_params(tab="gestion")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error guardando el inventario: {e}")
 
     # ---- REPORTES ----
     with tab4:
         st.subheader("📑 Reportes")
-        if dfv.empty:
+        if df_view.empty:
             st.info("No hay datos en el inventario para generar reportes.")
         else:
-            total = len(dfv)
-            valor_total = float(pd.to_numeric(dfv.get("Valor", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-            radicadas = int((dfv["EstadoNorm"] == "Radicada").sum())
+            total = len(df_view)
+            valor_total = float(df_view["Valor"].fillna(0).sum()) if "Valor" in df_view.columns else 0.0
+            radicadas = int((df_view["EstadoCanon"] == "Radicada").sum())
             avance = round((radicadas / total) * 100, 2) if total else 0.0
             c1, c2, c3 = st.columns(3)
             c1.metric("Número de facturas", f"{total:,}")
             c2.metric("Valor total", f"${valor_total:,.0f}")
             c3.metric("% avance general", f"{avance}%")
 
-            if "Mes" not in dfv.columns:
-                st.info("No hay columna 'Mes' en el inventario; se omiten algunos gráficos.")
-            else:
-                st.markdown("### Gráficos")
-                if {"EPS","EstadoNorm"}.issubset(dfv.columns):
-                    eps_count = dfv.groupby("EPS")["EstadoNorm"].count().reset_index(name="Facturas")
-                    fig_eps_funnel = px.funnel(eps_count.sort_values("Facturas", ascending=False).head(25),
-                                               x="Facturas", y="EPS", title="Embudo por EPS (Top 25, # de facturas)")
-                    st.plotly_chart(fig_eps_funnel, use_container_width=True)
+            st.markdown("### Gráficos")
+            if {"EPS","NumeroFactura"}.issubset(df_view.columns):
+                eps_count = df_view.groupby("EPS")["NumeroFactura"].count().reset_index(name="Facturas")
+                fig_eps_funnel = px.funnel(eps_count.sort_values("Facturas", ascending=False).head(25),
+                                           x="Facturas", y="EPS", title="Embudo por EPS (Top 25, # de facturas)")
+                st.plotly_chart(fig_eps_funnel, use_container_width=True)
 
-                if {"Vigencia","EstadoNorm"}.issubset(dfv.columns):
-                    vig_estado = dfv.groupby(["Vigencia", "EstadoNorm"]).size().reset_index(name="Facturas")
-                    fig_vig_donut = px.pie(vig_estado.groupby("Vigencia")["Facturas"].sum().reset_index(),
-                                           names="Vigencia", values="Facturas",
-                                           hole=0.4, title="Participación por Vigencia")
-                    fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
-                    st.plotly_chart(fig_vig_donut, use_container_width=True)
+            if {"Vigencia","NumeroFactura"}.issubset(df_view.columns):
+                vig_estado = df_view.groupby("Vigencia")["NumeroFactura"].count().reset_index(name="Facturas")
+                fig_vig_donut = px.pie(vig_estado, names="Vigencia", values="Facturas",
+                                       hole=0.4, title="Participación por Vigencia")
+                fig_vig_donut.update_traces(textposition="inside", textinfo="percent+value")
+                st.plotly_chart(fig_vig_donut, use_container_width=True)
 
-                if {"Mes","EstadoNorm"}.issubset(dfv.columns):
-                    mes_estado = dfv.groupby(["Mes", "EstadoNorm"]).size().reset_index(name="Facturas")
-                    mes_sum = mes_estado.groupby("Mes")["Facturas"].sum().reset_index()
-                    fig_mes_donut = px.pie(mes_sum, names="Mes", values="Facturas",
-                                           hole=0.4, title="Participación por Mes")
-                    fig_mes_donut.update_traces(textposition="inside", textinfo="percent+value")
-                    st.plotly_chart(fig_mes_donut, use_container_width=True)
+            if {"Mes","NumeroFactura"}.issubset(df_view.columns):
+                mes_sum = df_view.groupby("Mes")["NumeroFactura"].count().reset_index(name="Facturas")
+                fig_mes_donut = px.pie(mes_sum, names="Mes", values="Facturas",
+                                       hole=0.4, title="Participación por Mes")
+                fig_mes_donut.update_traces(textposition="inside", textinfo="percent+value")
+                st.plotly_chart(fig_mes_donut, use_container_width=True)
 
             st.markdown("### Resúmenes")
             def tabla_resumen(df_, by, nombre):
                 g = df_.groupby(by, dropna=False).agg(
-                    Facturas=("EstadoNorm", "count"),
-                    Valor=("Valor", lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                    Radicadas=("EstadoNorm", lambda s: (s == "Radicada").sum()),
-                    Pendientes=("EstadoNorm", lambda s: (s == "Pendiente").sum()),
-                    Auditadas=("EstadoNorm", lambda s: (s == "Auditada").sum()),
-                    Subsanadas=("EstadoNorm", lambda s: (s == "Subsanada").sum()),
+                    Facturas=("NumeroFactura", "count"),
+                    Valor=("Valor", "sum"),
+                    Radicadas=("EstadoCanon", lambda s: (s == "Radicada").sum()),
+                    Pendientes=("EstadoCanon", lambda s: (s == "Pendiente").sum()),
+                    Auditadas=("EstadoCanon", lambda s: (s == "Auditada").sum()),
+                    Subsanadas=("EstadoCanon", lambda s: (s == "Subsanada").sum()),
                 ).reset_index()
                 g["% Avance"] = (g["Radicadas"] / g["Facturas"]).fillna(0) * 100
                 st.subheader(f"Resumen por {nombre}")
                 st.dataframe(g, use_container_width=True)
                 return g
 
-            t_eps = tabla_resumen(dfv, "EPS", "EPS") if "EPS" in dfv.columns else pd.DataFrame()
-            t_vig = tabla_resumen(dfv, "Vigencia", "Vigencia") if "Vigencia" in dfv.columns else pd.DataFrame()
-            t_mes = tabla_resumen(dfv, "Mes", "Mes") if "Mes" in dfv.columns else pd.DataFrame()
+            t_eps = tabla_resumen(df_view, "EPS", "EPS") if "EPS" in df_view.columns else pd.DataFrame()
+            t_vig = tabla_resumen(df_view, "Vigencia", "Vigencia") if "Vigencia" in df_view.columns else pd.DataFrame()
+            t_mes = tabla_resumen(df_view, "Mes", "Mes") if "Mes" in df_view.columns else pd.DataFrame()
 
             st.markdown("### Descarga")
-            xls_bytes_rep = exportar_dashboard_excel(df)  # reutilizo export que ya incluye resúmenes
+            def exportar_reportes_excel():
+                out = io.BytesIO()
+                with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                    pd.DataFrame(
+                        {"Métrica": ["# Facturas", "Valor total", "% Avance general"],
+                         "Valor": [total, valor_total, avance]}
+                    ).to_excel(writer, index=False, sheet_name="Resumen")
+                    if not t_eps.empty: t_eps.to_excel(writer, index=False, sheet_name="Por_EPS")
+                    if not t_vig.empty: t_vig.to_excel(writer, index=False, sheet_name="Por_Vigencia")
+                    if not t_mes.empty: t_mes.to_excel(writer, index=False, sheet_name="Por_Mes")
+                return out.getvalue()
+
+            xls_bytes_rep = exportar_reportes_excel()
             st.download_button(
                 "⬇️ Descargar reportes a Excel",
                 data=xls_bytes_rep,
@@ -649,59 +679,64 @@ def main_app():
     with tab5:
         st.subheader("📈 Avance (Real vs Proyectado — Acumulado)")
 
-        # Proyección mensual NO acumulada (según indicación), luego calculamos acumulado:
-        base = pd.DataFrame({
+        # Proyección mensual proporcionada por el usuario (no Excel). Se calcula acumulado y %.
+        mensual = pd.DataFrame({
             "Mes": ["Agosto 2025", "Septiembre 2025", "Octubre 2025", "Noviembre 2025"],
             "Cuentas estimadas": [515, 1489, 1797, 1738],
         })
-        base["Cuentas estimadas acumuladas"] = base["Cuentas estimadas"].cumsum()
-        meta_total = int(base["Cuentas estimadas"].sum())
-        base["% proyectado acumulado"] = (base["Cuentas estimadas acumuladas"] / meta_total * 100).round(2) if meta_total else 0.0
+        proy = mensual.copy()
+        proy["Cuentas estimadas acumuladas"] = proy["Cuentas estimadas"].cumsum()
+        total_meta = float(proy["Cuentas estimadas"].sum())
+        proy["% proyectado acumulado"] = (proy["Cuentas estimadas acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
 
-        if dfv.empty:
+        if df_view.empty:
             st.info("No hay datos reales para comparar aún.")
         else:
-            # Normalizar etiqueta de mes/año real
-            import re as _re
+            # Normalizar llave de mes real (usa FechaRadicacion si existe; si 'Mes' ya incluye año, usarla; si no, Mes+Vigencia; último: 'Sin Mes')
             def _etiqueta_mes(row):
-                fr = row.get("FechaRadicacion")
+                fr = row.get("FechaRadicacion", pd.NaT)
                 if pd.notna(fr):
                     fr = pd.to_datetime(fr, errors="coerce")
                     if pd.notna(fr):
-                        return f"{MES_NOMBRE[int(fr.month)]} {int(fr.year)}"
+                        return f"{MES_NOMBRE.get(int(fr.month), '')} {int(fr.year)}"
                 m = str(row.get("Mes", "")).strip()
-                if _re.search(r"\b20\d{2}\b", m):
+                if re.search(r"\b20\d{2}\b", m):
                     return m
                 vig = str(row.get("Vigencia", "")).strip()
                 if m and vig.isdigit():
                     return f"{m} {vig}"
                 return m or "Sin Mes"
 
-            df_rad = dfv[dfv["EstadoNorm"] == "Radicada"].copy()
-            df_rad["MesClave"] = df_rad.apply(_etiqueta_mes, axis=1)
+            df_rad = df_view[df_view["EstadoCanon"] == "Radicada"].copy()
+            if not df_rad.empty:
+                df_rad["MesClave"] = df_rad.apply(_etiqueta_mes, axis=1)
+                # Contar facturas únicas por MesClave
+                if "NumeroFactura" in df_rad.columns:
+                    reales = df_rad.groupby("MesClave")["NumeroFactura"].nunique().reset_index(name="Cuentas reales")
+                else:
+                    reales = df_rad.groupby("MesClave").size().reset_index(name="Cuentas reales")
+            else:
+                reales = pd.DataFrame(columns=["MesClave","Cuentas reales"])
 
-            reales = df_rad.groupby("MesClave")["NumeroFactura"].nunique().reset_index(name="Cuentas reales")
-
-            comp = base.merge(reales, left_on="Mes", right_on="MesClave", how="left").drop(columns=["MesClave"]).fillna(0)
+            comp = proy.merge(reales, left_on="Mes", right_on="MesClave", how="left").drop(columns=["MesClave"], errors="ignore").fillna(0)
             comp["Cuentas reales"] = comp["Cuentas reales"].astype(int)
             comp["Cuentas reales acumuladas"] = comp["Cuentas reales"].cumsum()
-            comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / meta_total * 100).round(2) if meta_total else 0.0
+            comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
             comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - comp["% proyectado acumulado"]).round(2)
 
             st.dataframe(comp, use_container_width=True)
 
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% proyectado acumulado"],
-                                     mode='lines+markers', name='Proyectado'))
-            fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% real acumulado"],
-                                     mode='lines+markers', name='Real'))
+            fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% proyectado acumulado"], mode='lines+markers', name='Proyectado'))
+            fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% real acumulado"], mode='lines+markers', name='Real'))
             fig.update_layout(title="Avance acumulado (%) — Real vs Proyectado", yaxis_title="% acumulado", xaxis_title="Mes")
             st.plotly_chart(fig, use_container_width=True)
 
+            # KPIs
             total_real = int(comp["Cuentas reales"].sum())
-            avance_real_total = (total_real / meta_total * 100) if meta_total else 0.0
+            avance_real_total = (total_real / total_meta * 100) if total_meta else 0.0
             c1, c2, c3 = st.columns(3)
-            c1.metric("Meta total (cuentas)", f"{meta_total:,}")
+            c1.metric("Meta total (cuentas)", f"{int(total_meta):,}")
             c2.metric("Reales acumuladas", f"{total_real:,}")
             c3.metric("Avance total vs meta", f"{avance_real_total:.1f}%")
 
