@@ -705,59 +705,75 @@ def main_app():
                 use_container_width=True
             )
 
+    
     # ---- AVANCE ----
     with tab5:
-        st.subheader("📈 Avance (Real vs Proyectado — Acumulado)")
+        st.subheader("📈 Avance (Real vs Proyectado — Acumulado basado en radicadas)")
 
-        # Proyección ACUMULADA (solo definimos cuentas; % se calcula automáticamente)
-        proy = pd.DataFrame({
+        # Plan de PORCENTAJE acumulado por mes (solo %; el sistema calcula cuentas según TOTAL RADICADAS actual)
+        plan_pct = pd.DataFrame({
             "Mes": ["Agosto 2025", "Septiembre 2025", "Octubre 2025", "Noviembre 2025"],
-            "Cuentas estimadas acumuladas": [515, 2004, 3801, 5539],
+            "Porcentaje acumulado": [9, 36, 69, 100]
         })
-        total_meta = float(proy["Cuentas estimadas acumuladas"].iloc[-1]) if not proy.empty else 0.0
-        proy["% proyectado acumulado"] = (proy["Cuentas estimadas acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
 
-        if df.empty:
-            st.info("No hay datos reales para comparar aún.")
+        # Total meta dinámico: total de cuentas RADICADAS actuales
+        total_meta = int((df["Estado"] == "Radicada").sum()) if not df.empty and "Estado" in df.columns else 0
+
+        if total_meta == 0:
+            st.info("Aún no hay facturas 'Radicada'. Cuando existan, el sistema calculará automáticamente las metas acumuladas.")
         else:
-            # Construir MesY = "Mes Vigencia" cuando ambos existen, si no, usar Mes
+            # Cuentas estimadas acumuladas = total_meta * %/100 (redondeo al entero y mantenemos no-decreciente)
+            plan = plan_pct.copy()
+            plan["Cuentas estimadas acumuladas"] = (total_meta * plan["Porcentaje acumulado"] / 100.0).round().astype(int)
+            plan["Cuentas estimadas acumuladas"] = plan["Cuentas estimadas acumuladas"].cummax()
+
+            # ===== Reales acumuladas: SOLO radicadas, alineadas al orden del plan =====
             df_tmp = df.copy()
-            df_tmp["Mes"] = df_tmp["Mes"].astype(str).fillna("")
-            if "Vigencia" in df_tmp.columns:
-                df_tmp["MesY"] = df_tmp.apply(lambda r: f"{r['Mes']} {int(r['Vigencia'])}" if pd.notna(r["Vigencia"]) and str(r["Vigencia"]).isdigit() and r["Mes"] else r["Mes"], axis=1)
+            # Intentar construir etiqueta "Mes Año" desde FechaRadicacion; si no hay, usar 'Mes' tal cual
+            def mes_label(row):
+                if pd.notna(row.get("FechaRadicacion", pd.NaT)):
+                    dt = pd.to_datetime(row["FechaRadicacion"], errors="coerce")
+                    if pd.notna(dt):
+                        mname = MES_NOMBRE.get(int(dt.month), "")
+                        return f"{mname} {int(dt.year)}" if mname else ""
+                # fallback: si ya existe 'Mes' estilo "Agosto 2025", úsalo
+                return str(row.get("Mes",""))
+            if "FechaRadicacion" in df_tmp.columns:
+                df_tmp["MesPlan"] = df_tmp.apply(mes_label, axis=1)
             else:
-                df_tmp["MesY"] = df_tmp["Mes"]
+                df_tmp["MesPlan"] = df_tmp["Mes"].astype(str)
 
-            # Contar cuentas reales por MesY (NumeroFactura)
-            reales = df_tmp.groupby("MesY")["NumeroFactura"].count().reset_index(name="Cuentas reales")
-
-            # Alinear al orden de la proyección
-            comp = proy.merge(reales, left_on="Mes", right_on="MesY", how="left").drop(columns=["MesY"]).fillna(0)
+            reales_mensual = df_tmp[df_tmp["Estado"]=="Radicada"].groupby("MesPlan")["NumeroFactura"].count().reset_index(name="Cuentas reales")
+            comp = plan.merge(reales_mensual, left_on="Mes", right_on="MesPlan", how="left").drop(columns=["MesPlan"]).fillna(0)
             comp["Cuentas reales"] = comp["Cuentas reales"].astype(int)
-
             comp["Cuentas reales acumuladas"] = comp["Cuentas reales"].cumsum()
-            comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
+
+            # % acumulados
+            comp["% proyectado acumulado"] = comp["Porcentaje acumulado"].astype(float)
+            comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / total_meta * 100).round(2)
             comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - comp["% proyectado acumulado"]).round(2)
 
-            st.dataframe(comp, use_container_width=True)
+            st.dataframe(comp[["Mes","Cuentas estimadas acumuladas","% proyectado acumulado","Cuentas reales acumuladas","% real acumulado","Diferencia % (Real - Proy)"]],
+                         use_container_width=True)
 
-            # Gráfico de comparación
+            # Gráfico de líneas comparativas
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% proyectado acumulado"],
                                      mode='lines+markers', name='Proyectado'))
             fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% real acumulado"],
                                      mode='lines+markers', name='Real'))
-            fig.update_layout(title="Avance acumulado (%) — Real vs Proyectado", yaxis_title="% acumulado", xaxis_title="Mes")
+            fig.update_layout(title=f"Avance acumulado (%) — Real vs Proyectado (Meta dinámica: {total_meta:,} radicadas)",
+                              yaxis_title="% acumulado", xaxis_title="Mes",
+                              yaxis=dict(range=[0,105]))
             st.plotly_chart(fig, use_container_width=True)
 
-            # Indicador general
-            total_real = int(comp["Cuentas reales"].sum())
+            # KPIs
+            total_real = int(comp["Cuentas reales acumuladas"].iloc[-1])
             avance_real_total = (total_real / total_meta * 100) if total_meta else 0.0
             c1, c2, c3 = st.columns(3)
-            c1.metric("Meta total (cuentas)", f"{int(total_meta):,}")
+            c1.metric("Meta total (radicadas)", f"{int(total_meta):,}")
             c2.metric("Reales acumuladas", f"{total_real:,}")
             c3.metric("Avance total vs meta", f"{avance_real_total:.1f}%")
-
 # ====== BOOT ======
 if "autenticado" not in st.session_state:
     login()
