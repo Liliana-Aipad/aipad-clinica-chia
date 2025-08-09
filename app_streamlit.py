@@ -1,15 +1,16 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 02:10"
+APP_VERSION = "2025-08-09 02:35 (Excel only)"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
 
 import pandas as pd
-import os, re, io, zipfile, tempfile
+import os, re, io
 import plotly.express as px
 from datetime import datetime, date
 import streamlit.components.v1 as components
+from pathlib import Path as _Path
 
 # === Archivos esperados en la raíz ===
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -38,11 +39,10 @@ def _to_ts(d):
 def guardar_inventario(df: pd.DataFrame):
     """Guarda DataFrame al Excel y limpia caché."""
     try:
-        # Usar openpyxl si está disponible; si no, CSV
         with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
             df.to_excel(w, index=False)
     except Exception:
-        df.to_csv(Path(INVENTARIO_FILE).with_suffix(".csv"), index=False, encoding="utf-8-sig")
+        df.to_csv(_Path(INVENTARIO_FILE).with_suffix(".csv"), index=False, encoding="utf-8-sig")
     st.cache_data.clear()
 
 def registro_por_factura(df: pd.DataFrame, numero_factura: str):
@@ -186,10 +186,9 @@ def aplicar_movimiento_masivo(df: pd.DataFrame, indices, nuevo_estado: str):
         df.at[idx, "FechaMovimiento"] = ahora
     guardar_inventario(df)
 
-# ====== Export helpers (Excel/PDF) ======
+# ====== Export helpers (Excel) ======
 def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
-    # Resúmenes iguales a lo mostrado en el dashboard
     total = len(df)
     radicadas = int((df["Estado"] == "Radicada").sum())
     total_valor = float(df["Valor"].fillna(0).sum())
@@ -229,89 +228,7 @@ def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
             g_vig.to_excel(writer, sheet_name="Por_Vigencia")
     return output.getvalue()
 
-
-def check_pdf_dependencies() -> tuple[bool, str]:
-    try:
-        import reportlab  # noqa: F401
-    except Exception as e:
-        return False, f"Falta reportlab: {e}"
-    try:
-        import kaleido  # noqa: F401
-    except Exception as e:
-        return False, f"Falta kaleido: {e}"
-    try:
-        import plotly.graph_objects as go
-        # Prueba mínima de render a imagen en memoria
-        fig = go.Figure(go.Scatter(x=[0,1], y=[0,1]))
-        _ = fig.to_image(format="png", scale=1, engine="kaleido")
-    except Exception as e:
-        return False, f"Plotly/Kaleido no pudieron renderizar imágenes: {e}"
-    return True, "OK"
-
-def exportar_dashboard_pdf(df: pd.DataFrame) -> bytes:
-    """Genera un PDF con KPIs + gráficos.
-       Usa kaleido en memoria (sin archivos temporales) + reportlab.
-    """
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import cm
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import ImageReader
-    import plotly.express as px
-
-    # Crear figuras (similares a las del dashboard)
-    figs = []
-    if "Estado" in df.columns:
-        figs.append(px.pie(df, names="Estado", hole=0.4, title="Distribución por Estado",
-                           color="Estado", color_discrete_map=ESTADO_COLORES))
-    if {"EPS","Valor","Estado"}.issubset(df.columns):
-        figs.append(px.bar(df, x="EPS", y="Valor", color="Estado", barmode="group",
-                           title="Valor total por EPS", color_discrete_map=ESTADO_COLORES))
-    if {"Mes","Estado","Valor"}.issubset(df.columns):
-        figs.append(px.area(df, x="Mes", y="Valor", color="Estado",
-                            title="Valor total por Mes", line_group="Estado",
-                            color_discrete_map=ESTADO_COLORES))
-    if {"Vigencia","Estado","Valor"}.issubset(df.columns):
-        figs.append(px.bar(df, x="Vigencia", y="Valor", color="Estado", barmode="group",
-                           title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES))
-
-    # Renderizar cada figura a PNG en memoria
-    images = []
-    for f in figs:
-        img_bytes = f.to_image(format="png", scale=2, engine="kaleido")
-        images.append(ImageReader(io.BytesIO(img_bytes)))
-
-    # Crear PDF
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    W, H = A4
-
-    total = len(df)
-    radicadas = int((df["Estado"] == "Radicada").sum()) if "Estado" in df.columns else 0
-    total_valor = float(df["Valor"].fillna(0).sum()) if "Valor" in df.columns else 0
-    avance = round((radicadas / total) * 100, 2) if total else 0.0
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(2*cm, H-2*cm, "Dashboard - Resumen")
-    c.setFont("Helvetica", 11)
-    c.drawString(2*cm, H-3*cm, f"Total facturas: {total}")
-    c.drawString(2*cm, H-3.6*cm, f"Valor total: ${total_valor:,.0f}")
-    c.drawString(2*cm, H-4.2*cm, f"% Avance (radicadas): {avance}%")
-
-    y = H-5.2*cm
-    for img in images:
-        c.drawImage(img, 2*cm, y-8*cm, width=W-4*cm, height=8*cm, preserveAspectRatio=True, anchor='n')
-        y -= 9*cm
-        if y < 6*cm:
-            c.showPage()
-            y = H-2*cm
-
-    c.showPage()
-    c.save()
-    pdf_bytes = buf.getvalue()
-    buf.close()
-    return pdf_bytes
-
-
+# ====== APP ======
 def main_app():
     st.caption(f"🆔 Versión: {APP_VERSION}")
     st.title("📊 AIPAD • Control de Radicación")
@@ -330,7 +247,6 @@ def main_app():
     tab_labels = ["📋 Dashboard", "🗂️ Bandejas", "📝 Gestión", "📑 Reportes"]
     tab1, tab2, tab3, tab4 = st.tabs(tab_labels)
 
-    # Si hay query param ?tab=bandejas o ?tab=gestion, forzar selección
     if qp.get("tab", [""])[0] == "bandejas":
         _select_tab("🗂️ Bandejas")
     elif qp.get("tab", [""])[0] == "gestion":
@@ -434,34 +350,16 @@ def main_app():
                     )
                     st.plotly_chart(fig_vig_pie, use_container_width=True)
 
-            # --- Descargas Dashboard ---
+            # --- Descarga Dashboard (solo Excel) ---
             st.divider()
-            cdb1, cdb2 = st.columns(2)
-            with cdb1:
-                xls_bytes = exportar_dashboard_excel(df)
-                st.download_button(
-                    "⬇️ Descargar Dashboard a Excel",
-                    data=xls_bytes,
-                    file_name="dashboard_radicacion.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            with cdb2:
-                ok_deps, detail = check_pdf_dependencies()
-                if ok_deps:
-                    try:
-                        pdf_bytes = exportar_dashboard_pdf(df)
-                        st.download_button(
-                            "⬇️ Descargar Dashboard en PDF",
-                            data=pdf_bytes,
-                            file_name="dashboard_radicacion.pdf",
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-                    except Exception as e:
-                        st.error(f"No se pudo generar el PDF: {e}")
-                else:
-                    st.warning("PDF no disponible: " + detail)
+            xls_bytes = exportar_dashboard_excel(df)
+            st.download_button(
+                "⬇️ Descargar Dashboard a Excel",
+                data=xls_bytes,
+                file_name="dashboard_radicacion.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     # ---- BANDEJAS (por estado, con filtros y paginación) ----
     with tab2:
