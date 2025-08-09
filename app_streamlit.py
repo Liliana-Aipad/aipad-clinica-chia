@@ -1,12 +1,12 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 03:32"
+APP_VERSION = "2025-08-09 04:25"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
 
 import pandas as pd
-import os, re, io, tempfile
+import os, re, io
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
@@ -105,20 +105,29 @@ def load_data():
                 "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
         return pd.DataFrame(columns=cols)
     df = pd.read_excel(INVENTARIO_FILE)
+
+    # Normalizar fechas
     for col in ["FechaRadicacion", "FechaMovimiento"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    # Asegurar columnas mínimas
     cols_needed = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
                    "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
     for c in cols_needed:
         if c not in df.columns:
             df[c] = pd.NA
+
+    # Tipos
     df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
     if "Vigencia" in df.columns:
         df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+
+    # Normalizar estado
     if "Estado" in df.columns:
         df["Estado"] = df["Estado"].astype(str).str.strip()
         df.loc[~df["Estado"].isin(ESTADOS), "Estado"] = "Pendiente"
+
     return df
 
 # ====== Auth ======
@@ -251,7 +260,7 @@ def main_app():
             c2.metric("💰 Valor total", f"${total_valor:,.0f}")
             c3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-            # Distribución por Estado (donut) — se mantiene
+            # Distribución por Estado (donut)
             if "Estado" in df.columns:
                 fig_estado = px.pie(
                     df, names="Estado", hole=0.4, title="Distribución por Estado",
@@ -260,70 +269,51 @@ def main_app():
                 fig_estado.update_traces(textposition="inside", textinfo="percent+value")
                 st.plotly_chart(fig_estado, use_container_width=True)
 
-            # --- EPS --- (un SOLO gráfico: Embudo por # de facturas con cantidad y %)
+            # --- EPS ---
             st.markdown("## 🏥 Por EPS")
             if {"EPS","NumeroFactura"}.issubset(df.columns):
-                g_eps_cnt = df.groupby("EPS", dropna=False)["NumeroFactura"].count().reset_index(name="Facturas")
-                g_eps_cnt = g_eps_cnt.sort_values("Facturas", ascending=False).head(25)
-                total_eps = float(g_eps_cnt["Facturas"].sum()) if not g_eps_cnt.empty else 0.0
-                g_eps_cnt["%"] = (g_eps_cnt["Facturas"] / total_eps * 100).round(2) if total_eps else 0.0
-                g_eps_cnt["label"] = g_eps_cnt.apply(lambda r: f"{int(r['Facturas']):,} ({r['%']:.1f}%)", axis=1)
-                fig_funnel = px.funnel(g_eps_cnt, x="Facturas", y="EPS", title="Cantidad y % por EPS", text="label")
-                fig_funnel.update_traces(textposition="inside")
+                g = df.groupby("EPS", dropna=False).agg(
+                    N_Facturas=("NumeroFactura","count"),
+                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
+                ).fillna(0).sort_values("N_Facturas", ascending=False)
+                g["% del total"] = (g["N_Facturas"] / g["N_Facturas"].sum() * 100).round(2) if g["N_Facturas"].sum() else 0
+
+                # Un solo gráfico: embudo con cantidad y %
+                fig_funnel = px.funnel(g.reset_index().head(25), x="N_Facturas", y="EPS",
+                                       title="Cantidad y % por EPS")
+                # Mostrar % en etiqueta
+                fig_funnel.update_traces(texttemplate="%{x} (%{customdata}%)",
+                                         customdata=g.reset_index().head(25)["% del total"])
                 st.plotly_chart(fig_funnel, use_container_width=True)
 
             # --- Mes ---
             st.markdown("## 📅 Por Mes")
             if {"Mes","NumeroFactura"}.issubset(df.columns):
-                g_mes = df.groupby("Mes", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor","sum"),
-                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g_mes["% Avance"] = (g_mes["Radicadas"].astype(float)/g_mes["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
+                g_mes_full = df.groupby(["Mes","Estado"], dropna=False).agg(Valor=("Valor","sum")).reset_index()
+                fig_mes_val = px.area(
+                    g_mes_full, x="Mes", y="Valor", color="Estado",
+                    title="Estados por Mes", line_group="Estado",
+                    color_discrete_map=ESTADO_COLORES
+                )
+                st.plotly_chart(fig_mes_val, use_container_width=True)
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    # Cambiar título: "Estados por Mes" (manteniendo área por Estado)
-                    fig_mes_val = px.area(
-                        df, x="Mes", y="Valor", color="Estado",
-                        title="Estados por Mes", line_group="Estado",
-                        color_discrete_map=ESTADO_COLORES
-                    )
-                    st.plotly_chart(fig_mes_val, use_container_width=True)
-                with c2:
-                    # Barras en cantidad (número de facturas)
-                    fig_mes_cnt = px.bar(
-                        g_mes, x=g_mes.index, y="N_Facturas",
-                        title="Cantidad de facturas por Mes", text="N_Facturas"
-                    )
-                    st.plotly_chart(fig_mes_cnt, use_container_width=True)
+                g_mes_cnt = df.groupby("Mes", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
+                fig_mes_cnt = px.bar(g_mes_cnt, x="Mes", y="Cantidad", title="Cantidad de facturas por Mes", text="Cantidad")
+                st.plotly_chart(fig_mes_cnt, use_container_width=True)
 
             # --- Vigencia ---
             st.markdown("## 📆 Por Vigencia")
             if {"Vigencia","NumeroFactura"}.issubset(df.columns):
-                g_vig = df.groupby("Vigencia", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor","sum"),
-                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g_vig["% Avance"] = (g_vig["Radicadas"].astype(float)/g_vig["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
+                g_vig_val = df.groupby(["Vigencia","Estado"], dropna=False).agg(Valor=("Valor","sum")).reset_index()
+                fig_vig_val = px.bar(
+                    g_vig_val, x="Vigencia", y="Valor", color="Estado", barmode="group",
+                    title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
+                )
+                st.plotly_chart(fig_vig_val, use_container_width=True)
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    # Mantener barras de valor por Vigencia
-                    fig_vig_val = px.bar(
-                        df, x="Vigencia", y="Valor", color="Estado", barmode="group",
-                        title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
-                    )
-                    st.plotly_chart(fig_vig_val, use_container_width=True)
-                with c2:
-                    # Reemplazar el gráfico de facturas por Vigencia a BARRAS y en CANTIDAD
-                    fig_vig_cnt = px.bar(
-                        g_vig, x=g_vig.index, y="N_Facturas",
-                        title="Cantidad por Vigencia", text="N_Facturas"
-                    )
-                    st.plotly_chart(fig_vig_cnt, use_container_width=True)
+                g_vig_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
+                fig_vig_cnt = px.bar(g_vig_cnt, x="Vigencia", y="Cantidad", title="Cantidad por Vigencia", text="Cantidad")
+                st.plotly_chart(fig_vig_cnt, use_container_width=True)
 
             # --- Descarga Excel Dashboard ---
             st.divider()
@@ -335,6 +325,7 @@ def main_app():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+
     # ---- BANDEJAS ----
     with tab2:
         st.subheader("🗂️ Bandejas por estado")
@@ -354,14 +345,6 @@ def main_app():
                 per_page = st.selectbox("Filas por página", [50, 100, 200], index=1, key="bandeja_pp")
 
             tabs_estado = st.tabs(ESTADOS)
-
-            def paginar(df_, page, per_page_):
-                total = len(df_)
-                total_pages = max((total - 1) // per_page_ + 1, 1)
-                page = max(1, min(page, total_pages))
-                start = (page - 1) * per_page_
-                end = start + per_page_
-                return df_.iloc[start:end], total_pages, page
 
             for estado, tab in zip(ESTADOS, tabs_estado):
                 with tab:
@@ -616,8 +599,11 @@ def main_app():
             st.markdown("### Gráficos")
             if {"EPS","Estado"}.issubset(df.columns):
                 eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas")
-                fig_eps_funnel = px.funnel(eps_count.sort_values("Facturas", ascending=False).head(25),
-                                           x="Facturas", y="EPS", title="Embudo por EPS (Top 25, # de facturas)")
+                eps_count["% del total"] = (eps_count["Facturas"] / eps_count["Facturas"].sum() * 100).round(2) if eps_count["Facturas"].sum() else 0
+                eps_count = eps_count.sort_values("Facturas", ascending=False).head(25)
+                fig_eps_funnel = px.funnel(eps_count, x="Facturas", y="EPS", title="Cantidad y % por EPS")
+                fig_eps_funnel.update_traces(texttemplate="%{x} (%{customdata}%)",
+                                             customdata=eps_count["% del total"])
                 st.plotly_chart(fig_eps_funnel, use_container_width=True)
 
             if {"Vigencia","Estado"}.issubset(df.columns):
@@ -677,48 +663,58 @@ def main_app():
                 use_container_width=True
             )
 
-    
     # ---- AVANCE ----
     with tab5:
         st.subheader("📈 Avance (Real vs Proyectado — Acumulado)")
 
-        # Proyección mensual (no acumulada): el sistema calcula acumulado automáticamente
+        # Proyección mensual (NO acumulada). A partir de esto se calcula acumulado y %.
         proy_base = pd.DataFrame({
             "Mes": ["Agosto 2025", "Septiembre 2025", "Octubre 2025", "Noviembre 2025"],
             "Cuentas estimadas": [515, 1489, 1797, 1738],
         })
-        # Acumulado y % proyectado acumulado
-        proy_base["Cuentas estimadas acumuladas"] = proy_base["Cuentas estimadas"].cumsum()
-        total_meta = float(proy_base["Cuentas estimadas"].sum())
-        proy_base["% proyectado acumulado"] = (proy_base["Cuentas estimadas acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
+        proy = proy_base.copy()
+        proy["Cuentas estimadas acumuladas"] = proy["Cuentas estimadas"].cumsum()
+        total_meta = int(proy["Cuentas estimadas"].sum())
+        proy["% proyectado acumulado"] = (proy["Cuentas estimadas acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
 
         if df.empty:
             st.info("No hay datos reales para comparar aún.")
         else:
-            # Construir MesY = "Mes Vigencia" cuando ambos existen, si no, usar Mes
-            df_tmp = df.copy()
-            df_tmp["Mes"] = df_tmp["Mes"].astype(str).fillna("")
-            if "Vigencia" in df_tmp.columns:
-                df_tmp["MesY"] = df_tmp.apply(lambda r: f"{r['Mes']} {int(r['Vigencia'])}" if pd.notna(r["Vigencia"]) and str(r["Vigencia"]).isdigit() and r["Mes"] else r["Mes"], axis=1)
+            # === Normalizar llave de mes para los datos REALES ===
+            import re as _re
+            def _etiqueta_mes(row):
+                fr = row.get("FechaRadicacion")
+                if pd.notna(fr):
+                    fr = pd.to_datetime(fr, errors="coerce")
+                    if pd.notna(fr):
+                        return f"{MES_NOMBRE[int(fr.month)]} {int(fr.year)}"
+                m = str(row.get("Mes", "")).strip()
+                if _re.search(r"\\b20\\d{2}\\b", m):
+                    return m
+                vig = str(row.get("Vigencia", "")).strip()
+                if m and vig.isdigit():
+                    return f"{m} {vig}"
+                return m or "Sin Mes"
+
+            # Solo RADICADAS
+            df_rad = df[df["Estado"] == "Radicada"].copy()
+            if df_rad.empty:
+                st.info("Aún no hay cuentas 'Radicada' para calcular avance real.")
+                reales = pd.DataFrame(columns=["MesClave","Cuentas reales"])
             else:
-                df_tmp["MesY"] = df_tmp["Mes"]
+                df_rad["MesClave"] = df_rad.apply(_etiqueta_mes, axis=1)
+                reales = df_rad.groupby("MesClave")["NumeroFactura"].nunique().reset_index(name="Cuentas reales")
 
-            # Contar cuentas reales por MesY (NumeroFactura) SOLO Radicadas
-            if "Estado" in df_tmp.columns:
-                df_tmp = df_tmp[df_tmp["Estado"] == "Radicada"]
-            reales = df_tmp.groupby("MesY")["NumeroFactura"].count().reset_index(name="Cuentas reales")
-
-            # Alinear al orden de la proyección
-            comp = proy_base.merge(reales, left_on="Mes", right_on="MesY", how="left").drop(columns=["MesY"]).fillna(0)
+            # Unir proyección con real
+            comp = proy.merge(reales, left_on="Mes", right_on="MesClave", how="left").drop(columns=["MesClave"], errors="ignore").fillna(0)
             comp["Cuentas reales"] = comp["Cuentas reales"].astype(int)
-
             comp["Cuentas reales acumuladas"] = comp["Cuentas reales"].cumsum()
             comp["% real acumulado"] = (comp["Cuentas reales acumuladas"] / total_meta * 100).round(2) if total_meta else 0.0
             comp["Diferencia % (Real - Proy)"] = (comp["% real acumulado"] - comp["% proyectado acumulado"]).round(2)
 
             st.dataframe(comp, use_container_width=True)
 
-            # Gráfico de comparación
+            # Gráfico comparación
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=comp["Mes"], y=comp["% proyectado acumulado"],
                                      mode='lines+markers', name='Proyectado'))
@@ -727,13 +723,14 @@ def main_app():
             fig.update_layout(title="Avance acumulado (%) — Real vs Proyectado", yaxis_title="% acumulado", xaxis_title="Mes")
             st.plotly_chart(fig, use_container_width=True)
 
-            # Indicadores generales
+            # KPIs
             total_real = int(comp["Cuentas reales"].sum())
             avance_real_total = (total_real / total_meta * 100) if total_meta else 0.0
             c1, c2, c3 = st.columns(3)
             c1.metric("Meta total (cuentas)", f"{int(total_meta):,}")
             c2.metric("Reales acumuladas", f"{total_real:,}")
             c3.metric("Avance total vs meta", f"{avance_real_total:.1f}%")
+
 # ====== BOOT ======
 if "autenticado" not in st.session_state:
     login()
