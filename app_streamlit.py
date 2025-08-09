@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 07:22"
+APP_VERSION = "2025-08-09 09:15"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -12,19 +12,19 @@ from datetime import datetime, date
 import io, os, re, base64, json, requests, time, tempfile
 import streamlit.components.v1 as components
 
-# ===== Rutas absolutas (evita confusiones de carpeta) =====
+# ===== Rutas absolutas =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVENTARIO_FILE = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
 USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")
 LOCK_FILE      = os.path.join(BASE_DIR, ".inventario.lock")
 
-# ===== Parámetros visuales =====
+# ===== Visual =====
 ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
 ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
 MES_NOMBRE = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
               7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
-# ===== Utilidades UI =====
+# ===== UI helpers =====
 def flash_success(msg: str):
     st.session_state["_flash_ok"] = msg
 
@@ -33,19 +33,14 @@ def show_flash():
     if msg:
         st.success(msg)
 
-def _select_tab(label: str):
-    js = f"""
-    <script>
-    window.addEventListener('load', () => {{
-        const labels = Array.from(parent.document.querySelectorAll('button[role="tab"]'));
-        const target = labels.find(el => el.innerText.trim() === "{label}");
-        if (target) target.click();
-    }});
-    </script>
-    """
-    components.html(js, height=0, scrolling=False)
+# ===== GitHub (opcional) =====
+def github_enabled() -> bool:
+    try:
+        s = st.secrets.get("github", None)
+        return isinstance(s, dict) and all(k in s for k in ("token","owner","repo"))
+    except Exception:
+        return False
 
-# ===== GitHub helpers =====
 def _gh_headers():
     tok = st.secrets["github"]["token"]
     return {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
@@ -98,8 +93,8 @@ def load_data():
     return df
 
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
-    """Guarda local (lock + atómico), verifica leyendo y sincroniza a GitHub."""
-    # ------ Lock simple (multiusuario) ------
+    """Guarda local (lock + atómico), verifica y sincroniza a GitHub si está configurado."""
+    # ---- Lock simple ----
     t0 = time.time()
     while True:
         try:
@@ -110,7 +105,7 @@ def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -
                 return False, "Inventario en uso por otro usuario (timeout)"
             time.sleep(0.3)
     try:
-        # ------ Escribir a .xlsx temporal en misma carpeta ------
+        # ---- Escritura atómica local ----
         dir_dest = os.path.dirname(INVENTARIO_FILE) or "."
         with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=dir_dest, delete=False) as tf:
             tmp_path = tf.name
@@ -124,7 +119,7 @@ def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -
 
         st.cache_data.clear()
 
-        # ------ Verificar leyendo desde disco ------
+        # ---- Verificar lectura ----
         try:
             df_disk = pd.read_excel(INVENTARIO_FILE)
         except Exception as e:
@@ -134,35 +129,33 @@ def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -
             if not ok_row:
                 return False, f"Guardó local, pero la factura {factura_verificar} no aparece al releer"
 
-        # ------ Sincronizar a GitHub (commit) ------
-        try:
-            with open(INVENTARIO_FILE, "rb") as f:
-                content_bytes = f.read()
-            tries = 0
-            while tries < 3:
-                tries += 1
-                try:
-                    sha = gh_get_file_sha()
-                    gh_put_file(content_bytes, message=f"Update inventario (Factura {factura_verificar or ''})", sha=sha)
-                    break
-                except RuntimeError as e:
-                    if "sha" in str(e).lower() or "409" in str(e):
-                        time.sleep(0.8); continue
-                    return False, f"GitHub: {e}"
-        except Exception as e:
-            # Si falla GitHub igual consideramos guardado local OK, pero avisamos
-            return False, f"Guardó local pero falló GitHub: {e}"
-
-        return True, "OK"
+        # ---- GitHub opcional ----
+        if github_enabled():
+            try:
+                with open(INVENTARIO_FILE, "rb") as f:
+                    content_bytes = f.read()
+                tries = 0
+                while tries < 3:
+                    tries += 1
+                    try:
+                        sha = gh_get_file_sha()
+                        gh_put_file(content_bytes, message=f"Update inventario (Factura {factura_verificar or ''})", sha=sha)
+                        return True, "OK_GITHUB"
+                    except RuntimeError as e:
+                        if "sha" in str(e).lower() or "409" in str(e):
+                            time.sleep(0.8); continue
+                        return True, f"OK_LOCAL_GH_FAIL: {e}"
+            except Exception as e:
+                return True, f"OK_LOCAL_GH_FAIL: {e}"
+        # si no hay secrets:
+        return True, "OK_LOCAL"
     finally:
         try: os.remove(LOCK_FILE)
         except FileNotFoundError: pass
 
-# ===== Auth =====
+# ===== Auth (login con form y keys únicas) =====
 def login():
     st.sidebar.title("🔐 Ingreso")
-
-    # Usar un form evita que se creen/doble-rendericen widgets en reruns
     with st.sidebar.form("login_form", clear_on_submit=False):
         cedula = st.text_input("Cédula", key="login_cedula")
         contrasena = st.text_input("Contraseña", type="password", key="login_pwd")
@@ -182,24 +175,20 @@ def login():
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}")
 
-
 # ===== App =====
 def main_app():
     st.caption(f"🆔 Versión: {APP_VERSION}")
     st.title("📊 AIPAD • Control de Radicación")
+    if "usuario" in st.session_state and "rol" in st.session_state:
+        st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
     df = load_data()
-
-    # Vista segura: no toca el archivo
+    # Normalización de estados (solo para vista)
     df_view = df.copy()
     if "Estado" in df_view.columns:
         norm = df_view["Estado"].astype(str).str.strip().str.lower()
-        mapa = {
-            "radicada":"Radicada","radicadas":"Radicada",
-            "pendiente":"Pendiente",
-            "auditada":"Auditada","auditadas":"Auditada",
-            "subsanada":"Subsanada","subsanadas":"Subsanada",
-        }
+        mapa = {"radicada":"Radicada","radicadas":"Radicada","pendiente":"Pendiente",
+                "auditada":"Auditada","auditadas":"Auditada","subsanada":"Subsanada","subsanadas":"Subsanada"}
         df_view["EstadoCanon"] = norm.map(mapa).fillna(df_view["Estado"])
     else:
         df_view["EstadoCanon"] = ""
@@ -224,31 +213,22 @@ def main_app():
             c2.metric("💰 Valor total", f"${total_valor:,.0f}")
             c3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-# --- Distribución por Estado (torta / anillo) ---
-if {"Estado","NumeroFactura"}.issubset(df.columns):
-    # Cantidad de facturas por estado (usa los nombres tal cual en tu archivo)
-    g_estado = df.groupby("Estado", dropna=False)["NumeroFactura"] \
-                 .count().reset_index(name="Cantidad")
+            # ---- Torta por Estado (como en tu captura) ----
+            if {"Estado","NumeroFactura"}.issubset(df.columns):
+                g_estado = df.groupby("Estado", dropna=False)["NumeroFactura"] \
+                             .count().reset_index(name="Cantidad")
+                fig_estado = px.pie(
+                    g_estado, names="Estado", values="Cantidad",
+                    hole=0.5, title="Distribución por Estado",
+                    color="Estado", color_discrete_map=ESTADO_COLORES
+                )
+                fig_estado.update_traces(textposition="inside", textinfo="percent+value")
+                st.plotly_chart(fig_estado, use_container_width=True)
 
-    # Donut con colores definidos en ESTADO_COLORES
-    fig_estado = px.pie(
-        g_estado,
-        names="Estado",
-        values="Cantidad",
-        hole=0.5,
-        title="Distribución por Estado",
-        color="Estado",
-        color_discrete_map=ESTADO_COLORES
-    )
-    # Mostrar % y cantidad dentro de cada segmento
-    fig_estado.update_traces(textposition="inside", textinfo="percent+value")
-    st.plotly_chart(fig_estado, use_container_width=True)
-
-
+            # ---- EPS (dos gráficos en una fila) ----
             st.markdown("## 🏥 Por EPS")
             e1,e2 = st.columns(2)
             if {"EPS","NumeroFactura"}.issubset(df.columns):
-                # Embudo: cantidad y % por EPS (Top 25)
                 g_cnt = df.groupby("EPS", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
                 g_cnt = g_cnt.sort_values("Cantidad", ascending=False).head(25)
                 total_cnt = g_cnt["Cantidad"].sum() if not g_cnt.empty else 0
@@ -269,6 +249,7 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
                         fig_eps_val.update_layout(xaxis={'categoryorder':'total descending'})
                         st.plotly_chart(fig_eps_val, use_container_width=True)
 
+            # ---- Vigencia (dos gráficos en una fila) ----
             st.markdown("## 📆 Por Vigencia")
             v1,v2 = st.columns(2)
             if {"Vigencia","Estado","Valor","NumeroFactura"}.issubset(df.columns):
@@ -314,10 +295,17 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
 
             with st.expander("🧪 Diagnóstico de inventario"):
                 st.code(f"Inventario en: {INVENTARIO_FILE}", language="bash")
+                st.caption(f"🛠️ GitHub configurado: {'Sí' if github_enabled() else 'No'}")
                 c1, c2 = st.columns(2)
                 if c1.button("🔄 Forzar recarga desde disco"):
                     st.cache_data.clear(); st.rerun()
-                qn = c2.text_input("🔍 Ver factura por número:")
+                if github_enabled() and c2.button("Probar conexión a GitHub"):
+                    try:
+                        sha = gh_get_file_sha()
+                        st.success(f"Conexión OK. SHA actual: {sha or 'nuevo archivo'}")
+                    except Exception as e:
+                        st.error(f"Fallo conexión GitHub: {e}")
+                qn = st.text_input("🔍 Ver factura por número:")
                 if qn:
                     try:
                         ddf = pd.read_excel(INVENTARIO_FILE)
@@ -391,14 +379,15 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
                     nuevo_estado = c1.selectbox("Mover seleccionadas a:", [e for e in ESTADOS if e != estado])
                     mover = c2.button("Aplicar movimiento", type="primary", disabled=(len(seleccionados)==0), key=f"mover_{estado}")
                     if mover:
-                        # movimiento masivo seguro (sin tocar FechaRadicacion)
                         ahora = pd.Timestamp(datetime.now())
                         for idx in seleccionados:
                             df.at[idx, "Estado"] = nuevo_estado
                             df.at[idx, "FechaMovimiento"] = ahora
                         ok, msg = guardar_inventario(df)
                         if ok:
-                            flash_success(f"✅ Cambios guardados — {len(seleccionados)} facturas movidas a {nuevo_estado}")
+                            tag = "(sincronizado con GitHub)" if msg=="OK_GITHUB" else "(guardado local)"
+                            if str(msg).startswith("OK_LOCAL_GH_FAIL"): tag = "(guardado local; GitHub no disponible)"
+                            flash_success(f"✅ Cambios guardados — {len(seleccionados)} facturas movidas a {nuevo_estado} {tag}")
                             st.rerun()
                         else:
                             st.error(f"❌ Error guardando: {msg}")
@@ -443,7 +432,7 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
                 }
 
                 ctop1, ctop2, ctop3 = st.columns(3)
-                ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True)
+                ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True, key="gestion_id_display")
                 est_val = ctop2.selectbox("Estado", options=ESTADOS,
                                           index=ESTADOS.index(def_val["Estado"]) if def_val["Estado"] in ESTADOS else 0,
                                           key="estado_val")
@@ -454,18 +443,17 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
 
                 with st.form("form_factura", clear_on_submit=False):
                     f1, f2 = st.columns(2)
-                    num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"])
-                    valor_val = f1.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]))
-                    eps_val = f1.text_input("EPS", value=def_val["EPS"])
+                    num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"], key="gestion_num_factura")
+                    valor_val = f1.number_input("Valor", min_value=0.0, step=1000.0, value=float(def_val["Valor"]), key="gestion_valor")
+                    eps_val = f1.text_input("EPS", value=def_val["EPS"], key="gestion_eps")
 
-                    vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]))
-                    obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100)
+                    vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]), key="gestion_vigencia")
+                    obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100, key="gestion_obs")
 
-                    submit = st.form_submit_button("💾 Guardar cambios", type="primary")
+                    submit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True)
 
                 if submit:
                     ahora = pd.Timestamp(datetime.now())
-                    # localizar por numero final
                     mask2 = df.get("NumeroFactura", pd.Series(dtype=str)).astype(str).str.strip() == str(num_val).strip()
                     existe2 = bool(mask2.any()); idx2 = df[mask2].index[0] if existe2 else None
 
@@ -482,7 +470,6 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
                     estado_cambio = (estado_actual != estado_anterior) or (not existe2)
                     fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
 
-                    # ID
                     if existe2 and "ID" in df.columns and pd.notna(df.loc[idx2,"ID"]) and str(df.loc[idx2,"ID"]).strip():
                         new_id = str(df.loc[idx2,"ID"]).strip()
                     else:
@@ -514,7 +501,9 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
 
                     ok, msg = guardar_inventario(df, factura_verificar=registro["NumeroFactura"])
                     if ok:
-                        flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} (sincronizado con GitHub)")
+                        tag = "(sincronizado con GitHub)" if msg=="OK_GITHUB" else "(guardado local)"
+                        if str(msg).startswith("OK_LOCAL_GH_FAIL"): tag = "(guardado local; GitHub no disponible)"
+                        flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} {tag}")
                         st.session_state["factura_activa"] = ""
                         st.rerun()
                     else:
@@ -571,7 +560,6 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
     with tab_avance:
         show_flash()
         st.subheader("📈 Avance (Real vs Proyectado — Acumulado)")
-        # Metas mensuales (no acumuladas); el sistema calcula acumulado y %
         base = pd.DataFrame({
             "Mes": ["Agosto 2025","Septiembre 2025","Octubre 2025","Noviembre 2025"],
             "Cuentas estimadas": [515, 1489, 1797, 1738],
@@ -592,7 +580,16 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
             if m and vig.isdigit(): return f"{m} {vig}"
             return m or "Sin Mes"
 
-        df_rad = df_view[df_view["EstadoCanon"]=="Radicada"].copy()
+        df_v = df.copy()
+        if "Estado" in df_v.columns:
+            df_v["EstadoCanon"] = df_v["Estado"].astype(str).str.strip().str.lower().map({
+                "radicada":"Radicada","radicadas":"Radicada",
+                "pendiente":"Pendiente","auditada":"Auditada","subsanada":"Subsanada"
+            }).fillna(df_v["Estado"])
+        else:
+            df_v["EstadoCanon"] = ""
+
+        df_rad = df_v[df_v["EstadoCanon"]=="Radicada"].copy()
         if df_rad.empty:
             st.info("Aún no hay cuentas radicadas para comparar.")
         else:
@@ -618,7 +615,8 @@ if {"Estado","NumeroFactura"}.issubset(df.columns):
             k3.metric("Avance total vs meta", f"{(comp['Cuentas reales'].sum()/total_meta*100 if total_meta else 0):.1f}%")
 
 # ===== Boot =====
-if "autenticado" not in st.session_state:
-    login()
-elif st.session_state.get("autenticado"):
+if st.session_state.get("autenticado", False):
     main_app()
+else:
+    login()
+
