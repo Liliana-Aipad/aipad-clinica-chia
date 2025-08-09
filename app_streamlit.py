@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 02:35 (Excel only)"
+APP_VERSION = "2025-08-09 02:45 (funnel/donut update, Excel only)"
 
 import streamlit as st
 st.set_page_config(layout="wide")  # Debe ser lo primero en Streamlit
@@ -10,7 +10,6 @@ import os, re, io
 import plotly.express as px
 from datetime import datetime, date
 import streamlit.components.v1 as components
-from pathlib import Path as _Path
 
 # === Archivos esperados en la raíz ===
 INVENTARIO_FILE = "inventario_cuentas.xlsx"
@@ -42,7 +41,7 @@ def guardar_inventario(df: pd.DataFrame):
         with pd.ExcelWriter(INVENTARIO_FILE, engine="openpyxl") as w:
             df.to_excel(w, index=False)
     except Exception:
-        df.to_csv(_Path(INVENTARIO_FILE).with_suffix(".csv"), index=False, encoding="utf-8-sig")
+        df.to_csv(os.path.splitext(INVENTARIO_FILE)[0] + ".csv", index=False, encoding="utf-8-sig")
     st.cache_data.clear()
 
 def registro_por_factura(df: pd.DataFrame, numero_factura: str):
@@ -56,9 +55,6 @@ def registro_por_factura(df: pd.DataFrame, numero_factura: str):
     return False, None, None
 
 def _id_num(id_str):
-    """Extrae el número del ID con formato CHIA-0001; si no coincide, intenta convertir a int.
-       Retorna None si no hay número válido.
-    """
     s = str(id_str).strip()
     m = re.match(r"^CHIA-(\d+)$", s)
     if m:
@@ -66,14 +62,12 @@ def _id_num(id_str):
             return int(m.group(1))
         except:
             return None
-    # fallback: intentar int directo
     try:
         return int(float(s))
     except:
         return None
 
 def siguiente_id(df: pd.DataFrame):
-    """Calcula el siguiente ID con prefijo CHIA-#### (relleno a 4 dígitos)."""
     if "ID" not in df.columns or df["ID"].dropna().empty:
         return "CHIA-0001"
     nums = df["ID"].apply(_id_num).dropna()
@@ -81,7 +75,6 @@ def siguiente_id(df: pd.DataFrame):
     return f"CHIA-{n:04d}"
 
 def _set_query_params(**kwargs):
-    # Compatibilidad con versiones nuevas/viejas de Streamlit
     try:
         st.query_params.clear()
         for k,v in kwargs.items():
@@ -90,7 +83,6 @@ def _set_query_params(**kwargs):
         st.experimental_set_query_params(**kwargs)
 
 def _select_tab(label: str):
-    """Fuerza seleccionar una pestaña por su etiqueta (helper con un poco de JS seguro)."""
     js = f"""
     <script>
     window.addEventListener('load', () => {{
@@ -106,34 +98,24 @@ def _select_tab(label: str):
 @st.cache_data
 def load_data():
     if not os.path.exists(INVENTARIO_FILE):
-        # Estructura vacía si no existe
         cols = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
                 "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
         return pd.DataFrame(columns=cols)
     df = pd.read_excel(INVENTARIO_FILE)
-
-    # Normalizar fechas si existen
     for col in ["FechaRadicacion", "FechaMovimiento"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    # Asegurar columnas mínimas
     cols_needed = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
                    "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
     for c in cols_needed:
         if c not in df.columns:
             df[c] = pd.NA
-
-    # Tipos
     df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
     if "Vigencia" in df.columns:
         df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
-
-    # Normalizar textos clave
     if "Estado" in df.columns:
         df["Estado"] = df["Estado"].astype(str).str.strip()
         df.loc[~df["Estado"].isin(ESTADOS), "Estado"] = "Pendiente"
-
     return df
 
 # ====== Auth ======
@@ -180,13 +162,12 @@ def aplicar_movimiento_masivo(df: pd.DataFrame, indices, nuevo_estado: str):
     for idx in indices:
         df.at[idx, "Estado"] = nuevo_estado
         if nuevo_estado == "Radicada" and pd.isna(df.at[idx, "FechaRadicacion"]):
-            # Si no tiene fecha, la definimos "hoy"
             df.at[idx, "FechaRadicacion"] = ahora.normalize()
             df.at[idx, "Mes"] = MES_NOMBRE.get(int(ahora.month), "")
         df.at[idx, "FechaMovimiento"] = ahora
     guardar_inventario(df)
 
-# ====== Export helpers (Excel) ======
+# ====== Export helpers (Excel only) ======
 def exportar_dashboard_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     total = len(df)
@@ -235,7 +216,7 @@ def main_app():
     if "usuario" in st.session_state and "rol" in st.session_state:
         st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
-    # Leer query param para re-seleccionar pestaña si aplica
+    # Query params
     qp = {}
     try:
         qp = dict(st.query_params)
@@ -268,69 +249,40 @@ def main_app():
             c2.metric("💰 Valor total", f"${total_valor:,.0f}")
             c3.metric("📊 Avance (radicadas)", f"{avance}%")
 
-            # Distribución por Estado (donut)
+            # Distribución por Estado (donut) - se mantiene
             if "Estado" in df.columns:
                 fig_estado = px.pie(
                     df, names="Estado", hole=0.4, title="Distribución por Estado",
                     color="Estado", color_discrete_map=ESTADO_COLORES
                 )
+                fig_estado.update_traces(textinfo="percent+value", textposition="inside", insidetextorientation="radial")
                 st.plotly_chart(fig_estado, use_container_width=True)
 
-
-            # --- EPS ---
+            # --- EPS → Embudo ---
             st.markdown("## 🏥 Por EPS (Embudo)")
             if {"EPS","NumeroFactura"}.issubset(df.columns):
-                g = df.groupby("EPS", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor", "sum")
-                ).fillna(0).sort_values("N_Facturas", ascending=False).head(25)
-                fig_eps_funnel = px.funnel(
-                    g.reset_index(),
-                    x="N_Facturas",
-                    y="EPS",
-                    title="Embudo: Número de facturas por EPS (Top 25)"
-                )
+                g_eps = df.groupby("EPS", dropna=False).agg(N_Facturas=("NumeroFactura","count")).reset_index()
+                g_eps = g_eps.sort_values("N_Facturas", ascending=False).head(25)
+                fig_eps_funnel = px.funnel(g_eps, y="EPS", x="N_Facturas", title="Embudo de facturas por EPS (Top 25)")
                 st.plotly_chart(fig_eps_funnel, use_container_width=True)
 
-            # --- Mes ---
-            st.markdown("## 📅 Por Mes (Torta/Anillo)")
-            if {"Mes","NumeroFactura"}.issubset(df.columns):
-                g = df.groupby("Mes", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor","sum")
-                ).fillna(0).sort_values("N_Facturas", ascending=False)
-                fig_mes_pie = px.pie(
-                    g.reset_index(),
-                    names="Mes",
-                    values="N_Facturas",
-                    hole=0.5,
-                    title="Distribución de facturas por Mes"
-                )
-                st.plotly_chart(fig_mes_pie, use_container_width=True)
-            # --- Vigencia ---
-            st.markdown("## 📆 Por Vigencia")
-            if {"Vigencia","NumeroFactura"}.issubset(df.columns):
-                g = df.groupby("Vigencia", dropna=False).agg(
-                    N_Facturas=("NumeroFactura","count"),
-                    Valor_Total=("Valor","sum"),
-                    Radicadas=("Estado", lambda x: (x=="Radicada").sum())
-                ).fillna(0)
-                g["% Avance"] = (g["Radicadas"].astype(float)/g["N_Facturas"].replace(0, float("nan"))*100).fillna(0).round(2)
+            # --- Mes → Donut ---
+            st.markdown("## 📅 Por Mes (Anillo)")
+            if "Mes" in df.columns:
+                g_mes = df.groupby("Mes", dropna=False).size().reset_index(name="N_Facturas")
+                fig_mes_donut = px.pie(g_mes, names="Mes", values="N_Facturas", hole=0.4, title="Distribución de facturas por Mes")
+                fig_mes_donut.update_traces(textinfo="percent+value", textposition="inside", insidetextorientation="radial")
+                st.plotly_chart(fig_mes_donut, use_container_width=True)
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    fig_vig_val = px.bar(
-                        df, x="Vigencia", y="Valor", color="Estado", barmode="group",
-                        title="Valor por Vigencia", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
-                    )
-                    st.plotly_chart(fig_vig_val, use_container_width=True)
-                with c2:
-                    fig_vig_pie = px.pie(
-                        df, names="Vigencia", hole=0.5, title="Distribución de Facturas por Vigencia"
-                    )
-                    st.plotly_chart(fig_vig_pie, use_container_width=True)
+            # --- Vigencia → Donut ---
+            st.markdown("## 📆 Por Vigencia (Anillo)")
+            if "Vigencia" in df.columns:
+                g_vig = df.groupby("Vigencia", dropna=False).size().reset_index(name="N_Facturas")
+                fig_vig_donut = px.pie(g_vig, names="Vigencia", values="N_Facturas", hole=0.4, title="Distribución de facturas por Vigencia")
+                fig_vig_donut.update_traces(textinfo="percent+value", textposition="inside", insidetextorientation="radial")
+                st.plotly_chart(fig_vig_donut, use_container_width=True)
 
-            # --- Descarga Dashboard (solo Excel) ---
+            # --- Descarga Dashboard (Excel) ---
             st.divider()
             xls_bytes = exportar_dashboard_excel(df)
             st.download_button(
@@ -341,14 +293,13 @@ def main_app():
                 use_container_width=True
             )
 
-    # ---- BANDEJAS (por estado, con filtros y paginación) ----
+    # ---- BANDEJAS ----
     with tab2:
         st.subheader("🗂️ Bandejas por estado")
 
         if df.empty:
             st.info("No hay datos para mostrar.")
         else:
-            # Filtros globales de bandeja
             fc1, fc2, fc3, fc4 = st.columns([1.2,1,1,1])
             with fc1:
                 q = st.text_input("🔎 Buscar factura (contiene)", key="bandeja_q")
@@ -361,7 +312,6 @@ def main_app():
             with fc4:
                 per_page = st.selectbox("Filas por página", [50, 100, 200], index=1, key="bandeja_pp")
 
-            # Pestañas internas por estado
             tabs_estado = st.tabs(ESTADOS)
 
             for estado, tab in zip(ESTADOS, tabs_estado):
@@ -369,14 +319,12 @@ def main_app():
                     sub = filtrar_por_estado(df, estado, eps_sel, vig_sel, q)
                     sub = sub.sort_values(by=["FechaMovimiento","NumeroFactura"], ascending=[False, True])
 
-                    # Estado de paginación en session_state
                     pg_key = f"page_{estado}"
                     if pg_key not in st.session_state:
                         st.session_state[pg_key] = 1
 
-                    # Barra de paginación
                     sub_page, total_pages, current_page = paginar(sub, st.session_state[pg_key], per_page)
-                    st.session_state[pg_key] = current_page  # normaliza rango
+                    st.session_state[pg_key] = current_page
 
                     cpa, cpb, cpc = st.columns([1,2,1])
                     with cpa:
@@ -387,14 +335,10 @@ def main_app():
                         st.markdown(f"**Página {current_page} / {total_pages}** &nbsp; &nbsp; (**{len(sub)}** registros)")
 
                     if prev:
-                        st.session_state[pg_key] = max(1, current_page-1)
-                        st.rerun()
+                        st.session_state[pg_key] = max(1, current_page-1); st.rerun()
                     if nextb:
-                        st.session_state[pg_key] = min(total_pages, current_page+1)
-                        st.rerun()
+                        st.session_state[pg_key] = min(total_pages, current_page+1); st.rerun()
 
-                    # Selección por fila en la página
-                    st.divider()
                     sel_all_key = f"sel_all_{estado}_{current_page}"
                     sel_all = st.checkbox("Seleccionar todo (esta página)", key=sel_all_key, value=False)
 
@@ -443,28 +387,22 @@ def main_app():
                     if mover:
                         aplicar_movimiento_masivo(df, seleccionados, nuevo_estado)
                         st.success(f"Se movieron {len(seleccionados)} facturas de {estado} → {nuevo_estado}")
-                        _set_query_params(tab="bandejas")
-                        st.rerun()
+                        _set_query_params(tab="bandejas"); st.rerun()
 
-    # ---- GESTIÓN (Formulario) ----
+    # ---- GESTIÓN ----
     with tab3:
         st.subheader("📝 Gestión")
 
         df = load_data().copy()
-
-        # Asegurar columnas mínimas
         cols_needed = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado",
                     "Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
         for c in cols_needed:
             if c not in df.columns:
                 df[c] = pd.NA
-
-        # Tipos
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
         for c in ["FechaRadicacion","FechaMovimiento"]:
             df[c] = pd.to_datetime(df[c], errors="coerce")
 
-        # Búsqueda
         colb1, colb2 = st.columns([2,1])
         with colb1:
             q_factura = st.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
@@ -482,7 +420,6 @@ def main_app():
             existe, idx, fila = registro_por_factura(df, numero_activo)
             st.caption(f"Factura seleccionada: **{numero_activo}** {'(existente)' if existe else '(nueva)'}")
 
-            # Valores por defecto
             if existe:
                 def_val = {
                     "ID": str(fila.get("ID","") if pd.notna(fila.get("ID","")) else ""),
@@ -498,7 +435,7 @@ def main_app():
                 }
             else:
                 def_val = {
-                    "ID": "",  # se autoasigna
+                    "ID": "",
                     "NumeroFactura": numero_activo,
                     "Valor": 0.0,
                     "EPS": "",
@@ -514,7 +451,6 @@ def main_app():
             eps_opciones = sorted([e for e in df["EPS"].dropna().astype(str).unique().tolist() if e]) or []
             vigencias = sorted([int(v) for v in pd.to_numeric(df["Vigencia"], errors="coerce").dropna().unique().tolist()] + [date.today().year])
 
-            # ======= Estado y Fecha de Radicación fuera del form para habilitar al instante =======
             ctop1, ctop2, ctop3 = st.columns(3)
             with ctop1:
                 st.text_input("ID (automático)", value=def_val["ID"] or "", disabled=True)
@@ -534,14 +470,12 @@ def main_app():
                     key="frad_val"
                 )
 
-            # Fecha de movimiento mostrada (si existe), siempre bloqueada
             st.text_input(
                 "Fecha de Movimiento (automática)",
                 value=str(def_val["FechaMovimiento"].date()) if pd.notna(def_val["FechaMovimiento"]) else "",
                 disabled=True
             )
 
-            # ======= Resto del formulario =======
             with st.form("form_factura", clear_on_submit=False):
                 c1, c2 = st.columns(2)
                 with c1:
@@ -557,15 +491,13 @@ def main_app():
 
             if submit:
                 ahora = pd.Timestamp(datetime.now())
-                # Tomar Estado y FechaRadicación de los widgets FUERA del form
                 estado_actual = st.session_state.get("estado_val", def_val["Estado"])
                 frad_widget = st.session_state.get("frad_val", date.today())
                 frad_ts = _to_ts(frad_widget) if estado_actual == "Radicada" else pd.NaT
                 mes_calc = MES_NOMBRE.get(int(frad_ts.month), "") if pd.notna(frad_ts) else def_val["Mes"]
 
-                # Armar fila nueva (ID se autogenera si viene vacío, con prefijo CHIA-####)
                 new_id = def_val["ID"]
-                if not new_id:  # si está vacío o no existe
+                if not new_id:
                     new_id = siguiente_id(df) if not existe else def_val["ID"]
 
                 nueva = {
@@ -580,7 +512,6 @@ def main_app():
                     "Mes": mes_calc
                 }
 
-                # ===== Reglas para FechaMovimiento: SOLO cuando cambia el Estado o es nuevo =====
                 estado_anterior = str(fila.get("Estado","")) if existe else ""
                 estado_cambio = (str(estado_actual) != estado_anterior) or (not existe)
 
@@ -589,7 +520,6 @@ def main_app():
                 else:
                     nueva["FechaMovimiento"] = ahora
 
-                # Insertar/actualizar
                 if existe:
                     for k, v in nueva.items():
                         df.at[idx, k] = v
@@ -599,13 +529,11 @@ def main_app():
                 try:
                     guardar_inventario(df)
                     st.success("✅ Cambios guardados. El formulario fue limpiado.")
-                    # Limpiar formulario sin ir al Dashboard y mantener pestaña Gestión
                     st.session_state["factura_activa"] = ""
                     for k in ["estado_val", "frad_val", "buscar_factura_input"]:
                         if k in st.session_state:
                             del st.session_state[k]
-                    _set_query_params(tab="gestion")
-                    st.rerun()
+                    _set_query_params(tab="gestion"); st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error guardando el inventario: {e}")
 
@@ -625,33 +553,36 @@ def main_app():
             c2.metric("Valor total", f"${valor_total:,.0f}")
             c3.metric("% avance general", f"{avance}%")
 
-            # Asegurar 'Mes' si hace falta
+            # Asegurar 'Mes'
             if "Mes" not in df.columns:
                 if "FechaRadicacion" in df.columns:
                     df["Mes"] = pd.to_datetime(df["FechaRadicacion"], errors="coerce").dt.to_period("M").astype(str)
                 else:
                     df["Mes"] = "Sin Mes"
 
-            # Gráficos
             st.markdown("### Gráficos")
-
+            # EPS → funnel
             if {"EPS","Estado"}.issubset(df.columns):
-                eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas").sort_values("Facturas", ascending=False).head(25)
-                fig_eps = px.funnel(eps_count, x="Facturas", y="EPS", title="Embudo: Facturas por EPS (Top 25)")
-                st.plotly_chart(fig_eps, use_container_width=True)
+                eps_count = df.groupby("EPS")["Estado"].count().reset_index(name="Facturas")
+                eps_count = eps_count.sort_values("Facturas", ascending=False).head(25)
+                fig_eps_funnel_r = px.funnel(eps_count, y="EPS", x="Facturas", title="Embudo: Facturas por EPS (Top 25)")
+                st.plotly_chart(fig_eps_funnel_r, use_container_width=True)
 
+            # Vigencia → donut
             if {"Vigencia","Estado"}.issubset(df.columns):
                 vig_count = df.groupby("Vigencia")["Estado"].count().reset_index(name="Facturas")
-                fig_vig = px.pie(vig_count, names="Vigencia", values="Facturas", hole=0.5,
-                                 title="Anillo: Distribución por Vigencia")
-                st.plotly_chart(fig_vig, use_container_width=True)
+                fig_vig_donut_r = px.pie(vig_count, names="Vigencia", values="Facturas", hole=0.4, title="Distribución por Vigencia")
+                fig_vig_donut_r.update_traces(textinfo="percent+value", textposition="inside", insidetextorientation="radial")
+                st.plotly_chart(fig_vig_donut_r, use_container_width=True)
 
+            # Mes → donut
             if {"Mes","Estado"}.issubset(df.columns):
-                mes_count = df.groupby("Mes")["Estado"].count().reset_index(name="Facturas").sort_values("Facturas", ascending=False)
-                fig_mes = px.pie(mes_count, names="Mes", values="Facturas", hole=0.5,
-                                 title="Anillo: Distribución por Mes")
-                st.plotly_chart(fig_mes, use_container_width=True)
-            # Tablas de resumen
+                mes_count = df.groupby("Mes")["Estado"].count().reset_index(name="Facturas")
+                fig_mes_donut_r = px.pie(mes_count, names="Mes", values="Facturas", hole=0.4, title="Distribución por Mes")
+                fig_mes_donut_r.update_traces(textinfo="percent+value", textposition="inside", insidetextorientation="radial")
+                st.plotly_chart(fig_mes_donut_r, use_container_width=True)
+
+            # Resúmenes (tablas) y descarga Excel
             st.markdown("### Resúmenes")
             def tabla_resumen(df_, by, nombre):
                 g = df_.groupby(by, dropna=False).agg(
@@ -671,7 +602,6 @@ def main_app():
             t_vig = tabla_resumen(df, "Vigencia", "Vigencia") if "Vigencia" in df.columns else pd.DataFrame()
             t_mes = tabla_resumen(df, "Mes", "Mes") if "Mes" in df.columns else pd.DataFrame()
 
-            # Exportar a Excel
             st.markdown("### Descarga")
             def exportar_reportes_excel():
                 out = io.BytesIO()
