@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-09 • Sheets robusto (estructura personalizada)"
+APP_VERSION = "2025-08-10 • Sheets robusto (inventario_cuentas)"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
@@ -15,11 +15,12 @@ import streamlit.components.v1 as components
 # ===== Google Sheets =====
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread_dataframe import set_with_dataframe  # solo para escribir
+from gspread_dataframe import set_with_dataframe
+from gspread.exceptions import APIError, WorksheetNotFound
 
 # ===== Login (usuarios locales en Excel) =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")  # opcional (si no lo usas, comenta login y setea autenticado=True)
+USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")  # opcional
 
 # ===== Visual =====
 ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
@@ -45,9 +46,9 @@ def _select_tab(label: str):
     """
     components.html(js, height=0, scrolling=False)
 
-# ========== Google Sheets helpers ==========
-def _open_worksheet():
-    """Abre la hoja por nombre (requiere scope Drive) o por ID si está en secrets."""
+# ========== Google Sheets: open robusto ==========
+def _open_spreadsheet():
+    """Abre el Spreadsheet por ID (preferido). Si no hay ID, cae a nombre."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -57,24 +58,58 @@ def _open_worksheet():
     gc = gspread.authorize(creds)
 
     cfg = st.secrets["googlesheets"]
-    spreadsheet_id = cfg.get("spreadsheet_id", "").strip() if isinstance(cfg.get("spreadsheet_id", ""), str) else ""
-    if spreadsheet_id:
-        sh = gc.open_by_key(spreadsheet_id)
-    else:
-        sh = gc.open(cfg["spreadsheet_name"])
-    ws = sh.worksheet(cfg["worksheet_name"])
+    ssid = str(cfg.get("spreadsheet_id","")).strip()
+    try:
+        if ssid:
+            return gc.open_by_key(ssid)
+        # fallback por nombre (requiere Drive scope)
+        return gc.open(cfg.get("spreadsheet_name","AIPAD Inventario"))
+    except APIError as e:
+        try:
+            st.error(f"APIError al abrir Spreadsheet: {e.response.text}")
+        except Exception:
+            st.error(f"APIError al abrir Spreadsheet: {e}")
+        raise
+
+def _pick_worksheet(sh):
+    """Devuelve el worksheet según secrets['worksheet_name'] con coincidencia flexible."""
+    target = str(st.secrets["googlesheets"].get("worksheet_name", "inventario_cuentas")).strip()
+    try:
+        # 1) Exacto
+        return sh.worksheet(target)
+    except WorksheetNotFound:
+        pass
+
+    # 2) Flexible (case-insensitive, espacios normalizados)
+    norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
+    target_n = norm(target)
+    try:
+        for ws in sh.worksheets():
+            if norm(ws.title) == target_n:
+                return ws
+    except APIError as e:
+        try:
+            st.error(f"APIError listando pestañas: {e.response.text}")
+        except Exception:
+            st.error(f"APIError listando pestañas: {e}")
+        raise
+
+    # 3) Último recurso
+    ws = sh.get_worksheet(0)
+    st.warning(f"No encontré la pestaña '{target}'. Usaré '{ws.title}'. "
+               f"Renombra tu pestaña o ajusta 'worksheet_name' en Secrets.")
     return ws
 
+def _open_worksheet():
+    sh = _open_spreadsheet()
+    return _pick_worksheet(sh)
+
+# ========== Normalización / tipos ==========
 def _parse_currency(s):
     if pd.isna(s) or s == "":
         return pd.NA
     txt = str(s)
-    # quitar símbolos y espacios
     txt = txt.replace("$", "").replace(" ", "").replace("\xa0","")
-    # eliminar separadores de miles . si parecen miles (heurística simple)
-    # y usar coma como decimal -> punto
-    # Primero reemplazar puntos de miles: dejar solo el último separador decimal
-    # Estrategia simple: quitar todos los puntos y luego convertir coma -> punto
     txt = txt.replace(".", "")
     txt = txt.replace(",", ".")
     try:
@@ -87,15 +122,15 @@ def _parse_currency(s):
 
 def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     """
-    Mantiene TODAS tus columnas:
-    ID | NumeroFactura | Valor Factura | Fecha factura | EPS | Documento | Paciente |
-    Vigencia | Estado | FechaMovimiento | FechaRadicacion | No Radicado |
-    Valor Radicado | Mes | Observaciones
-    + crea/normaliza auxiliares que la app espera: Valor, EstadoCanon, tipos de fecha/num.
+    Mantiene TODAS tus columnas y crea auxiliares que la app usa:
+    - Valor (desde 'Valor Factura' si existe)
+    - EstadoCanon (para gráficas)
+    - Fechas y vigencia a tipos correctos
+    - Mes desde FechaRadicacion si no viene
     """
     df = df_in.copy()
 
-    # Valor (auxiliar para gráficas): usa 'Valor Factura' si existe
+    # Valor auxiliar (para gráficas)
     if "Valor" not in df.columns:
         if "Valor Factura" in df.columns:
             df["Valor"] = df["Valor Factura"].apply(_parse_currency)
@@ -104,7 +139,7 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
 
-    # Valor Radicado (si existe)
+    # Valor Radicado
     if "Valor Radicado" in df.columns:
         df["Valor Radicado"] = df["Valor Radicado"].apply(_parse_currency)
 
@@ -113,7 +148,7 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", infer_datetime_format=True)
 
-    # Estado canon (solo para visualización)
+    # Estado canon
     if "Estado" in df.columns:
         canon_map = {
             "radicada":"Radicada","radicadas":"Radicada",
@@ -125,7 +160,7 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     else:
         df["EstadoCanon"] = ""
 
-    # Mes: si falta y hay FechaRadicacion, calcular (sin pisar si ya existe)
+    # Mes desde FechaRadicacion si falta
     if "Mes" not in df.columns:
         df["Mes"] = pd.NA
     if "FechaRadicacion" in df.columns:
@@ -141,31 +176,59 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # Quitar filas 100% vacías
     df = df.dropna(how="all")
-
     return df
 
+# ========== Carga/guardado ==========
 @st.cache_data
 def load_data():
-    """Lee el inventario desde Google Sheets de forma robusta y lo normaliza (sin perder columnas)."""
+    """Lectura robusta desde Google Sheets (sin perder columnas)."""
     try:
         ws = _open_worksheet()
-        rows = ws.get_all_records(default_blank="", head=1)  # usa fila 1 como encabezado
+
+        # Camino 1: registros con encabezado (fila 1)
+        try:
+            rows = ws.get_all_records(
+                default_blank="",
+                head=1,
+                value_render_option="UNFORMATTED_VALUE",
+                date_time_render_option="FORMATTED_STRING",
+            )
+        except APIError as e:
+            try:
+                st.error(f"APIError get_all_records: {e.response.text}")
+            except Exception:
+                st.error(f"APIError get_all_records: {e}")
+            rows = []
+
         if rows:
             df_raw = pd.DataFrame(rows)
         else:
-            vals = ws.get_all_values()
+            # Camino 2: todas las celdas
+            try:
+                vals = ws.get_all_values(
+                    value_render_option="UNFORMATTED_VALUE",
+                    date_time_render_option="FORMATTED_STRING",
+                )
+            except APIError as e:
+                try:
+                    st.error(f"APIError get_all_values: {e.response.text}")
+                except Exception:
+                    st.error(f"APIError get_all_values: {e}")
+                vals = []
+
             if not vals:
-                df_raw = pd.DataFrame()
-            else:
-                headers = vals[0] if len(vals) > 0 else []
-                data = vals[1:] if len(vals) > 1 else []
-                df_raw = pd.DataFrame(data, columns=headers)
+                return pd.DataFrame()
+
+            headers = vals[0] if len(vals) > 0 else []
+            data = vals[1:] if len(vals) > 1 else []
+            df_raw = pd.DataFrame(data, columns=headers)
 
         # limpiar encabezados vacíos
         df_raw = df_raw.loc[:, [c for c in df_raw.columns if c and str(c).strip() != ""]]
 
         df_norm = normalize_dataframe(df_raw)
         return df_norm
+
     except Exception as e:
         st.error(f"Error leyendo Google Sheets (robusto): {e}")
         # Estructura mínima para no romper UI
@@ -178,7 +241,6 @@ def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -
     """
     try:
         df_to_write = df.copy()
-
         # Convertir a texto las columnas de fecha conocidas
         for c in ["Fecha factura", "FechaRadicacion", "FechaMovimiento"]:
             if c in df_to_write.columns:
@@ -232,13 +294,12 @@ def main_app():
     df = load_data()
     df_view = df.copy()
     if "EstadoCanon" not in df_view.columns and "Estado" in df_view.columns:
-        canon_map = {
+        df_view["EstadoCanon"] = df_view["Estado"].astype(str).str.strip().str.lower().map({
             "radicada":"Radicada","radicadas":"Radicada",
             "pendiente":"Pendiente",
             "auditada":"Auditada","auditadas":"Auditada",
             "subsanada":"Subsanada","subsanadas":"Subsanada"
-        }
-        df_view["EstadoCanon"] = df_view["Estado"].astype(str).str.strip().str.lower().map(canon_map).fillna(df_view["Estado"])
+        }).fillna(df_view["Estado"])
 
     tab_dash, tab_bandejas, tab_gestion, tab_reportes, tab_avance = st.tabs(
         ["📋 Dashboard","🗂️ Bandejas","📝 Gestión","📑 Reportes","📈 Avance"]
@@ -345,28 +406,21 @@ def main_app():
             with st.expander("🧪 Diagnóstico de inventario"):
                 st.caption("📄 Origen: **Google Sheets** (Drive + Sheets API)")
                 cfg = st.secrets["googlesheets"]
-                st.code(f"Spreadsheet: {cfg.get('spreadsheet_name', cfg.get('spreadsheet_id','(por ID)'))}\nWorksheet:   {cfg['worksheet_name']}", language="bash")
-                c1, c2 = st.columns(2)
+                st.code(f"Spreadsheet ID: {cfg.get('spreadsheet_id','(no definido)')}\nWorksheet:   {cfg.get('worksheet_name','inventario_cuentas')}", language="bash")
+                c1, _ = st.columns([1,1])
                 if c1.button("🔄 Forzar recarga desde Sheets"):
                     st.cache_data.clear(); st.rerun()
-                qn = st.text_input("🔍 Ver factura por número:")
-                if qn:
+                with st.expander("🧪 Google Sheets (crudo)"):
                     try:
-                        ddf = load_data()
-                        st.dataframe(ddf[ddf["NumeroFactura"].astype(str).str.strip()==qn.strip()].tail(1),
-                                     use_container_width=True)
-                    except Exception as e:
-                        st.error(f"No pude leer datos: {e}")
-                with st.expander("🧪 Diagnóstico Google Sheets (lectura cruda)"):
-                    try:
-                        ws = _open_worksheet()
+                        sh = _open_spreadsheet()
+                        st.write("Pestañas disponibles:", [ws.title for ws in sh.worksheets()])
+                        ws = _pick_worksheet(sh)
+                        st.write("Usando pestaña:", ws.title)
                         headers = ws.row_values(1)
-                        st.write("**Encabezados (fila 1):**", headers)
-                        raw_rows = ws.get_all_values()
-                        st.write(f"**Filas totales (incluye encabezado):** {len(raw_rows)}")
-                        st.write("**Primeras 5 filas (crudo):**")
-                        st.write(raw_rows[:6])
-                        st.caption("Encabezados deben coincidir EXACTO con tus columnas para mapear correctamente.")
+                        st.write("Encabezados (fila 1):", headers[:30])
+                        sample = ws.get_all_values()[:6]
+                        st.write("Primeras 5 filas (crudo):")
+                        st.write(sample)
                     except Exception as e:
                         st.error(f"Diag falló: {e}")
 
@@ -419,7 +473,6 @@ def main_app():
                     st.divider()
                     sel_all = st.checkbox("Seleccionar todo (esta página)", key=f"selall_{estado}_{current_page}", value=False)
                     cols = ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"]
-                    # Si tienes más columnas que quieras ver aquí, agrégalas al arreglo 'cols'
                     view = page_df.reindex(columns=[c for c in cols if c in page_df.columns]).copy()
                     view.insert(0,"Seleccionar", sel_all)
                     edited = st.data_editor(view, hide_index=True, use_container_width=True, num_rows="fixed",
@@ -485,7 +538,7 @@ def main_app():
                     "FechaMovimiento": getv(fila,"FechaMovimiento", pd.NaT),
                     "Observaciones": str(getv(fila,"Observaciones","") or ""),
                     "Mes": str(getv(fila,"Mes","") or ""),
-                    # Extras de tu hoja:
+                    # Extras
                     "Fecha factura": getv(fila,"Fecha factura", pd.NaT),
                     "Documento": str(getv(fila,"Documento","") or ""),
                     "Paciente": str(getv(fila,"Paciente","") or ""),
@@ -493,7 +546,7 @@ def main_app():
                     "Valor Radicado": getv(fila,"Valor Radicado", pd.NA),
                 }
 
-                # Estado y FechaRadicacion (top)
+                # Top controls
                 ctop1, ctop2, ctop3 = st.columns(3)
                 ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True, key="gestion_id_display")
                 est_val = ctop2.selectbox("Estado", options=ESTADOS,
@@ -510,14 +563,13 @@ def main_app():
                     num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"], key="gestion_num_factura")
                     valor_val = f1.number_input("Valor (Valor Factura)", min_value=0.0, step=1000.0, value=float(def_val["Valor"]), key="gestion_valor")
                     eps_val = f1.text_input("EPS", value=def_val["EPS"], key="gestion_eps")
-                    # Extras columna a la izq
+                    # Extras izquierda
                     fecha_fact = f1.date_input("Fecha factura",
                                                value=(def_val["Fecha factura"].date() if isinstance(def_val["Fecha factura"], pd.Timestamp) and pd.notna(def_val["Fecha factura"]) else date.today()),
                                                key="gestion_fecha_factura")
                     doc_val = f1.text_input("Documento", value=str(def_val["Documento"]), key="gestion_documento")
                     pac_val = f1.text_input("Paciente", value=str(def_val["Paciente"]), key="gestion_paciente")
-
-                    # Columna derecha
+                    # Derecha
                     vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]), key="gestion_vigencia")
                     obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100, key="gestion_obs")
                     no_radicado = f2.text_input("No Radicado", value=str(def_val["No Radicado"]), key="gestion_no_radicado")
@@ -536,7 +588,6 @@ def main_app():
                     frad_widget = st.session_state.get("frad_val", def_val["FechaRadicacion"] if pd.notna(def_val["FechaRadicacion"]) else date.today())
                     frad_ts = pd.to_datetime(frad_widget) if estado_actual == "Radicada" else (pd.to_datetime(df.loc[idx2,"FechaRadicacion"]) if existe2 and "FechaRadicacion" in df.columns else pd.NaT)
 
-                    # Mes: recalcular solo si hay fecha radicación
                     mes_nuevo = (df.loc[idx2,"Mes"] if existe2 and "Mes" in df.columns else "")
                     if pd.notna(frad_ts):
                         mes_nuevo = MES_NOMBRE[int(frad_ts.month)]
@@ -544,7 +595,7 @@ def main_app():
                     estado_cambio = (estado_actual != estado_anterior) or (not existe2)
                     fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
 
-                    # ID: conservar si existe, o generar CHIA-####
+                    # ID
                     if existe2 and "ID" in df.columns and pd.notna(df.loc[idx2,"ID"]) and str(df.loc[idx2,"ID"]).strip():
                         new_id = str(df.loc[idx2,"ID"]).strip()
                     else:
@@ -555,11 +606,11 @@ def main_app():
                             nextn = 1
                         new_id = f"CHIA-{nextn:04d}"
 
-                    # Registro a escribir (incluye TUS columnas)
+                    # Registro con TODAS tus columnas clave
                     registro = {
                         "ID": new_id,
                         "NumeroFactura": str(num_val).strip(),
-                        "Valor": float(valor_val),  # auxiliar para gráficas
+                        "Valor": float(valor_val),  # auxiliar
                         "EPS": str(eps_val).strip(),
                         "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
                         "Estado": estado_actual,
@@ -567,7 +618,7 @@ def main_app():
                         "FechaMovimiento": fecha_mov,
                         "Observaciones": str(obs_val).strip(),
                         "Mes": mes_nuevo,
-                        # Tus columnas
+                        # Extras
                         "Fecha factura": pd.to_datetime(fecha_fact) if fecha_fact else pd.NaT,
                         "Documento": str(doc_val).strip() if doc_val is not None else "",
                         "Paciente": str(pac_val).strip() if pac_val is not None else "",
@@ -778,6 +829,7 @@ if st.session_state.get("autenticado", False):
     main_app()
 else:
     login()
+
 
 
 
