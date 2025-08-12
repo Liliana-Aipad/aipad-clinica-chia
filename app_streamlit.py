@@ -1,39 +1,35 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-10 • Sheets robusto (inventario_cuentas)"
+APP_VERSION = "2025-08-12 • Supabase auto + Excel fallback"
 
 import streamlit as st
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
 
+import os, io, re
+from datetime import datetime, date
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date
-import io, os, re
 import streamlit.components.v1 as components
+from filelock import FileLock, Timeout
 
-# ===== Google Sheets =====
-import gspread
-from google.oauth2.service_account import Credentials
-from gspread_dataframe import set_with_dataframe
-from gspread.exceptions import APIError, WorksheetNotFound
-
-# ===== Login (usuarios locales en Excel) =====
+# ========== Constantes y archivos ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USUARIOS_FILE  = os.path.join(BASE_DIR, "usuarios.xlsx")  # opcional
+INVENTARIO_LOCAL = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
+INVENTARIO_LOCK  = INVENTARIO_LOCAL + ".lock"
+USUARIOS_FILE    = os.path.join(BASE_DIR, "usuarios.xlsx")
 
-# ===== Visual =====
-ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
 ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
+ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
 MES_NOMBRE = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
               7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
-# ========== UI helpers ==========
-def flash_success(msg: str):
-    st.session_state["_flash_ok"] = msg
+# ========== Helpers de UI ==========
+def flash_success(msg: str): st.session_state["_flash_ok"] = msg
 def show_flash():
     msg = st.session_state.pop("_flash_ok", None)
     if msg: st.success(msg)
+
 def _select_tab(label: str):
     js = f"""
     <script>
@@ -46,72 +42,11 @@ def _select_tab(label: str):
     """
     components.html(js, height=0, scrolling=False)
 
-# ========== Google Sheets: open robusto ==========
-def _open_spreadsheet():
-    """Abre el Spreadsheet por ID (preferido). Si no hay ID, cae a nombre."""
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    gc = gspread.authorize(creds)
-
-    cfg = st.secrets["googlesheets"]
-    ssid = str(cfg.get("spreadsheet_id","")).strip()
-    try:
-        if ssid:
-            return gc.open_by_key(ssid)
-        # fallback por nombre (requiere Drive scope)
-        return gc.open(cfg.get("spreadsheet_name","AIPAD Inventario"))
-    except APIError as e:
-        try:
-            st.error(f"APIError al abrir Spreadsheet: {e.response.text}")
-        except Exception:
-            st.error(f"APIError al abrir Spreadsheet: {e}")
-        raise
-
-def _pick_worksheet(sh):
-    """Devuelve el worksheet según secrets['worksheet_name'] con coincidencia flexible."""
-    target = str(st.secrets["googlesheets"].get("worksheet_name", "inventario_cuentas")).strip()
-    try:
-        # 1) Exacto
-        return sh.worksheet(target)
-    except WorksheetNotFound:
-        pass
-
-    # 2) Flexible (case-insensitive, espacios normalizados)
-    norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
-    target_n = norm(target)
-    try:
-        for ws in sh.worksheets():
-            if norm(ws.title) == target_n:
-                return ws
-    except APIError as e:
-        try:
-            st.error(f"APIError listando pestañas: {e.response.text}")
-        except Exception:
-            st.error(f"APIError listando pestañas: {e}")
-        raise
-
-    # 3) Último recurso
-    ws = sh.get_worksheet(0)
-    st.warning(f"No encontré la pestaña '{target}'. Usaré '{ws.title}'. "
-               f"Renombra tu pestaña o ajusta 'worksheet_name' en Secrets.")
-    return ws
-
-def _open_worksheet():
-    sh = _open_spreadsheet()
-    return _pick_worksheet(sh)
-
 # ========== Normalización / tipos ==========
 def _parse_currency(s):
-    if pd.isna(s) or s == "":
-        return pd.NA
-    txt = str(s)
-    txt = txt.replace("$", "").replace(" ", "").replace("\xa0","")
-    txt = txt.replace(".", "")
-    txt = txt.replace(",", ".")
+    if pd.isna(s) or s == "": return pd.NA
+    txt = str(s).replace("$","").replace("\xa0","").replace(" ","")
+    txt = txt.replace(".","").replace(",",".")
     try:
         return float(txt)
     except:
@@ -130,7 +65,7 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     """
     df = df_in.copy()
 
-    # Valor auxiliar (para gráficas)
+    # Valor auxiliar
     if "Valor" not in df.columns:
         if "Valor Factura" in df.columns:
             df["Valor"] = df["Valor Factura"].apply(_parse_currency)
@@ -144,7 +79,7 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
         df["Valor Radicado"] = df["Valor Radicado"].apply(_parse_currency)
 
     # Fechas
-    for c in ["Fecha factura", "FechaRadicacion", "FechaMovimiento"]:
+    for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", infer_datetime_format=True)
 
@@ -178,91 +113,153 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(how="all")
     return df
 
-# ========== Carga/guardado ==========
+# ========== Excel local (fallback / también funciona como fuente principal) ==========
+def _read_excel_local(path: str) -> pd.DataFrame:
+    if not os.path.exists(path): return pd.DataFrame()
+    try:
+        df = pd.read_excel(path)
+        for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
+            if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+        if "Vigencia" in df.columns: df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"Error leyendo Excel local: {e}")
+        return pd.DataFrame()
+
+def _write_excel_local(df: pd.DataFrame, path: str) -> tuple[bool, str]:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with FileLock(INVENTARIO_LOCK, timeout=10):
+            tmp = path + ".tmp.xlsx"
+            with pd.ExcelWriter(tmp, engine="openpyxl") as w:
+                df.to_excel(w, index=False, sheet_name="inventario_cuentas")
+            if os.path.exists(path): os.remove(path)
+            os.rename(tmp, path)
+        return True, "OK_LOCAL"
+    except Timeout:
+        return False, "Otro usuario está guardando en este momento. Intenta de nuevo."
+    except Exception as e:
+        return False, f"Error guardando Excel local: {e}"
+
+# ========== Supabase (auto persistencia si hay claves) ==========
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
+def _get_supabase() -> "Client|None":
+    try:
+        cfg = st.secrets.get("supabase", {})
+        url = cfg.get("url"); key = cfg.get("anon_key")
+        if not url or not key or not create_client: return None
+        return create_client(url, key)
+    except Exception:
+        return None
+
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    out = []
+    for _, row in df.iterrows():
+        rec = {}
+        for col, val in row.items():
+            if isinstance(val, (pd.Timestamp, datetime)):
+                rec[col] = None if pd.isna(val) else pd.to_datetime(val).to_pydatetime().isoformat()
+            else:
+                rec[col] = None if (isinstance(val, float) and pd.isna(val)) or pd.isna(val) else val
+        out.append(rec)
+    return out
+
+def supabase_fetch_all() -> pd.DataFrame:
+    sb = _get_supabase()
+    if not sb: raise RuntimeError("Supabase no configurado")
+    res = sb.table("inventario").select("*").execute()
+    rows = res.data or []
+    df = pd.DataFrame(rows)
+    for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
+        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+    if "Vigencia" in df.columns: df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+    # asegurar columnas típicas
+    cols_all = ["id","NumeroFactura","Valor","Valor Factura","Valor Radicado","Fecha factura","EPS","Documento","Paciente",
+                "Vigencia","Estado","FechaMovimiento","FechaRadicacion","No Radicado","Mes","Observaciones","EstadoCanon"]
+    for c in cols_all:
+        if c not in df.columns: df[c] = pd.NA
+    return df
+
+def supabase_upsert(df: pd.DataFrame, pk: str = "NumeroFactura") -> tuple[bool, str]:
+    sb = _get_supabase()
+    if not sb: return False, "Supabase no configurado"
+    try:
+        records = _df_to_records(df)
+        sb.table("inventario").upsert(records, on_conflict=pk).execute()
+        return True, "OK_SUPABASE"
+    except Exception as e:
+        return False, f"Error Supabase upsert: {e}"
+
+def supabase_delete_by_numero(numero: str) -> tuple[bool, str]:
+    sb = _get_supabase()
+    if not sb: return False, "Supabase no configurado"
+    try:
+        sb.table("inventario").delete().eq("NumeroFactura", str(numero)).execute()
+        return True, "OK_SUPABASE"
+    except Exception as e:
+        return False, f"Error Supabase delete: {e}"
+
+# ========== Carga/guardado central ==========
 @st.cache_data
 def load_data():
-    """Lectura robusta desde Google Sheets (sin perder columnas)."""
+    # 1) Intentar Supabase
     try:
-        ws = _open_worksheet()
-
-        # Camino 1: registros con encabezado (fila 1)
-        try:
-            rows = ws.get_all_records(
-                default_blank="",
-                head=1,
-                value_render_option="UNFORMATTED_VALUE",
-                date_time_render_option="FORMATTED_STRING",
-            )
-        except APIError as e:
-            try:
-                st.error(f"APIError get_all_records: {e.response.text}")
-            except Exception:
-                st.error(f"APIError get_all_records: {e}")
-            rows = []
-
-        if rows:
-            df_raw = pd.DataFrame(rows)
-        else:
-            # Camino 2: todas las celdas
-            try:
-                vals = ws.get_all_values(
-                    value_render_option="UNFORMATTED_VALUE",
-                    date_time_render_option="FORMATTED_STRING",
-                )
-            except APIError as e:
-                try:
-                    st.error(f"APIError get_all_values: {e.response.text}")
-                except Exception:
-                    st.error(f"APIError get_all_values: {e}")
-                vals = []
-
-            if not vals:
-                return pd.DataFrame()
-
-            headers = vals[0] if len(vals) > 0 else []
-            data = vals[1:] if len(vals) > 1 else []
-            df_raw = pd.DataFrame(data, columns=headers)
-
-        # limpiar encabezados vacíos
-        df_raw = df_raw.loc[:, [c for c in df_raw.columns if c and str(c).strip() != ""]]
-
-        df_norm = normalize_dataframe(df_raw)
-        return df_norm
-
+        sb = _get_supabase()
+        if sb:
+            df_raw = supabase_fetch_all()
+            return normalize_dataframe(df_raw)
     except Exception as e:
-        st.error(f"Error leyendo Google Sheets (robusto): {e}")
-        # Estructura mínima para no romper UI
-        cols_min = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","Mes","FechaRadicacion","FechaMovimiento","Observaciones"]
+        st.warning(f"No pude leer Supabase, uso Excel local: {e}")
+
+    # 2) Fallback: Excel local
+    df_raw = _read_excel_local(INVENTARIO_LOCAL)
+    if df_raw.empty:
+        cols_min = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","Mes","FechaRadicacion","FechaMovimiento","Observaciones",
+                    "Valor Factura","Fecha factura","Documento","Paciente","No Radicado","Valor Radicado"]
         return pd.DataFrame(columns=cols_min)
+    try:
+        return normalize_dataframe(df_raw)
+    except Exception:
+        return df_raw
 
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
-    """
-    Escribe TODO el DataFrame a Google Sheets (sin perder columnas personalizadas).
-    """
+    """Guarda en Supabase si está configurado; si no, en Excel local. Luego verifica lectura."""
+    df_to_save = df.copy()
+    for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
+        if c in df_to_save.columns:
+            df_to_save[c] = pd.to_datetime(df_to_save[c], errors="coerce")
+
+    # Intento Supabase
     try:
-        df_to_write = df.copy()
-        # Convertir a texto las columnas de fecha conocidas
-        for c in ["Fecha factura", "FechaRadicacion", "FechaMovimiento"]:
-            if c in df_to_write.columns:
-                df_to_write[c] = pd.to_datetime(df_to_write[c], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        ws = _open_worksheet()
-        ws.clear()
-        set_with_dataframe(ws, df_to_write, include_index=False, include_column_header=True, resize=True)
-
-        st.cache_data.clear()
-
-        if factura_verificar and "NumeroFactura" in df_to_write.columns:
-            df_new = load_data()
-            ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
-            if not ok_row:
-                return False, f"Guardó en Sheets, pero la factura {factura_verificar} no aparece al releer"
-
-        return True, "OK_SHEETS"
+        sb = _get_supabase()
+        if sb:
+            ok, msg = supabase_upsert(df_to_save, pk="NumeroFactura")
+            if not ok: return False, msg
+            st.cache_data.clear()
+            if factura_verificar:
+                df_new = load_data()
+                ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
+                if not ok_row: return False, f"Guardó en Supabase, pero la factura {factura_verificar} no aparece al releer."
+            return True, "OK_SUPABASE"
     except Exception as e:
-        return False, f"Error guardando en Google Sheets: {e}"
+        st.warning(f"No pude guardar en Supabase, intento Excel local: {e}")
 
-# ========== Auth ==========
+    # Fallback Excel
+    ok, msg = _write_excel_local(df_to_save, INVENTARIO_LOCAL)
+    if not ok: return False, msg
+    st.cache_data.clear()
+    if factura_verificar:
+        df_new = load_data()
+        ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
+        if not ok_row: return False, f"Guardó en Excel, pero la factura {factura_verificar} no aparece al releer."
+    return True, "OK_LOCAL"
+
+# ========== Login (opcional con usuarios.xlsx) ==========
 def login():
     st.sidebar.title("🔐 Ingreso")
     with st.sidebar.form("login_form", clear_on_submit=False):
@@ -291,6 +288,73 @@ def main_app():
     if "usuario" in st.session_state and "rol" in st.session_state:
         st.markdown(f"👤 Usuario: `{st.session_state['usuario']}`  |  🔐 Rol: `{st.session_state['rol']}`")
 
+    # Tabs
+    tab_tabla, tab_dash, tab_bandejas, tab_gestion, tab_reportes, tab_avance = st.tabs(
+        ["📄 Tabla","📋 Dashboard","🗂️ Bandejas","📝 Gestión","📑 Reportes","📈 Avance"]
+    )
+
+    # ===== 📄 TABLA =====
+    with tab_tabla:
+        show_flash()
+        st.subheader("📄 Tabla (inventario base)")
+
+        # Subir Excel para reemplazar
+        up = st.file_uploader("Sube un Excel (.xlsx) con el inventario", type=["xlsx"], accept_multiple_files=False, key="uploader_tabla")
+        c1, c2, c3 = st.columns([1,1,1])
+        if c1.button("📥 Cargar Excel (reemplazar)", use_container_width=True, type="secondary", disabled=(up is None), key="btn_cargar_excel"):
+            try:
+                df_up = pd.read_excel(up)
+                ok, msg = _write_excel_local(df_up, INVENTARIO_LOCAL)
+                if ok:
+                    st.cache_data.clear()
+                    st.success(f"✅ Inventario reemplazado desde archivo '{up.name}'.")
+                    st.rerun()
+                else:
+                    st.error(f"❌ No se pudo guardar: {msg}")
+            except Exception as e:
+                st.error(f"❌ Error leyendo el archivo subido: {e}")
+
+        df_live = load_data().copy()
+        st.caption(f"Registros actuales: **{len(df_live)}**")
+        st.info("Puedes editar directamente en la tabla. Luego pulsa **Guardar cambios en Excel**.")
+        edited = st.data_editor(
+            df_live,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="tabla_editor_main",
+        )
+
+        c4, c5, c6 = st.columns([1,1,1])
+        if c4.button("💾 Guardar cambios en Excel/DB", type="primary", use_container_width=True, key="btn_guardar_tabla"):
+            ok, msg = guardar_inventario(edited)
+            if ok:
+                tag = "(Supabase)" if msg=="OK_SUPABASE" else "(Excel local)"
+                st.success(f"✅ Cambios guardados {tag}.")
+                st.rerun()
+            else:
+                st.error(f"❌ Error guardando: {msg}")
+
+        if c5.button("🔄 Recargar desde origen", use_container_width=True, key="btn_recargar_tabla"):
+            st.cache_data.clear()
+            st.rerun()
+
+        def _export_bytes(df_export: pd.DataFrame) -> bytes:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                df_export.to_excel(w, index=False, sheet_name="inventario_cuentas")
+            return buf.getvalue()
+
+        st.download_button(
+            "⬇️ Descargar inventario actual (.xlsx)",
+            data=_export_bytes(load_data()),
+            file_name="inventario_cuentas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_inventario_actual"
+        )
+
+    # ===== cargar una vez para las demás pestañas =====
     df = load_data()
     df_view = df.copy()
     if "EstadoCanon" not in df_view.columns and "Estado" in df_view.columns:
@@ -301,11 +365,7 @@ def main_app():
             "subsanada":"Subsanada","subsanadas":"Subsanada"
         }).fillna(df_view["Estado"])
 
-    tab_dash, tab_bandejas, tab_gestion, tab_reportes, tab_avance = st.tabs(
-        ["📋 Dashboard","🗂️ Bandejas","📝 Gestión","📑 Reportes","📈 Avance"]
-    )
-
-    # ===== Dashboard =====
+    # ===== 📋 DASHBOARD =====
     with tab_dash:
         show_flash()
         if df.empty:
@@ -330,7 +390,7 @@ def main_app():
                 fig_estado.update_traces(textposition="inside", textinfo="percent+value")
                 st.plotly_chart(fig_estado, use_container_width=True, key="dash_estado_donut")
 
-            # EPS (funnel + barras valor radicado)
+            # EPS
             st.markdown("## 🏥 Por EPS")
             e1,e2 = st.columns(2)
             if {"EPS","NumeroFactura"}.issubset(df.columns):
@@ -348,8 +408,7 @@ def main_app():
                 with e2:
                     prefer_col = "Valor Radicado" if "Valor Radicado" in df.columns else "Valor"
                     df_rad = df_view[df_view["EstadoCanon"]=="Radicada"].copy()
-                    if prefer_col not in df_rad.columns:
-                        df_rad[prefer_col] = pd.NA
+                    if prefer_col not in df_rad.columns: df_rad[prefer_col] = pd.NA
                     g_val = df_rad.groupby("EPS", dropna=False)[prefer_col].sum().reset_index(name="ValorRadicado")
                     g_val = g_val.sort_values("ValorRadicado", ascending=False)
                     fig_eps_val = px.bar(g_val, x="EPS", y="ValorRadicado",
@@ -358,7 +417,7 @@ def main_app():
                     fig_eps_val.update_layout(xaxis={'categoryorder':'total descending'})
                     st.plotly_chart(fig_eps_val, use_container_width=True, key="dash_eps_val")
 
-            # Vigencia (barras por estado + donut cantidad)
+            # Vigencia
             st.markdown("## 📆 Por Vigencia")
             v1,v2 = st.columns(2)
             if {"Vigencia","Estado","Valor","NumeroFactura"}.issubset(df.columns):
@@ -403,28 +462,7 @@ def main_app():
                                use_container_width=True,
                                key="dl_dashboard")
 
-            with st.expander("🧪 Diagnóstico de inventario"):
-                st.caption("📄 Origen: **Google Sheets** (Drive + Sheets API)")
-                cfg = st.secrets["googlesheets"]
-                st.code(f"Spreadsheet ID: {cfg.get('spreadsheet_id','(no definido)')}\nWorksheet:   {cfg.get('worksheet_name','inventario_cuentas')}", language="bash")
-                c1, _ = st.columns([1,1])
-                if c1.button("🔄 Forzar recarga desde Sheets"):
-                    st.cache_data.clear(); st.rerun()
-                with st.expander("🧪 Google Sheets (crudo)"):
-                    try:
-                        sh = _open_spreadsheet()
-                        st.write("Pestañas disponibles:", [ws.title for ws in sh.worksheets()])
-                        ws = _pick_worksheet(sh)
-                        st.write("Usando pestaña:", ws.title)
-                        headers = ws.row_values(1)
-                        st.write("Encabezados (fila 1):", headers[:30])
-                        sample = ws.get_all_values()[:6]
-                        st.write("Primeras 5 filas (crudo):")
-                        st.write(sample)
-                    except Exception as e:
-                        st.error(f"Diag falló: {e}")
-
-    # ===== Bandejas =====
+    # ===== 🗂️ BANDEJAS =====
     with tab_bandejas:
         show_flash()
         st.subheader("🗂️ Bandejas por estado")
@@ -432,12 +470,12 @@ def main_app():
             st.info("No hay datos para mostrar.")
         else:
             c1,c2,c3,c4 = st.columns([1.4,1,1,1])
-            q = c1.text_input("🔎 Buscar factura (contiene)")
+            q = c1.text_input("🔎 Buscar factura (contiene)", key="ban_q")
             eps_opts = ["Todos"] + sorted([e for e in df.get("EPS", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if e])
-            eps_sel = c2.selectbox("EPS", eps_opts, index=0)
+            eps_sel = c2.selectbox("EPS", eps_opts, index=0, key="ban_eps")
             vig_opts = ["Todos"] + sorted([str(int(v)) for v in pd.to_numeric(df.get("Vigencia", pd.Series(dtype=float)), errors="coerce").dropna().unique().tolist()])
-            vig_sel = c3.selectbox("Vigencia", vig_opts, index=0)
-            per_page = c4.selectbox("Filas por página", [50,100,200], index=1)
+            vig_sel = c3.selectbox("Vigencia", vig_opts, index=0, key="ban_vig")
+            per_page = c4.selectbox("Filas por página", [50,100,200], index=1, key="ban_pp")
 
             def _filtrar(df_, estado, eps, vig, qtext):
                 sub = df_[df_["Estado"]==estado].copy()
@@ -464,9 +502,9 @@ def main_app():
                     st.session_state[key_page]=current_page
 
                     cpa, cpb, cpc = st.columns([1,2,1])
-                    prevb = cpa.button("⬅️ Anterior", disabled=(current_page<=1), key=f"prev_{estado}")
+                    prevb = cpa.button("⬅️ Anterior", disabled=(current_page<=1), key=f"prev_{estado}_{current_page}")
                     cpb.markdown(f"**Página {current_page} / {total_pages}** &nbsp; (**{len(sub)}** registros)")
-                    nextb = cpc.button("Siguiente ➡️", disabled=(current_page>=total_pages), key=f"next_{estado}")
+                    nextb = cpc.button("Siguiente ➡️", disabled=(current_page>=total_pages), key=f"next_{estado}_{current_page}")
                     if prevb: st.session_state[key_page]=max(1,current_page-1); st.rerun()
                     if nextb: st.session_state[key_page]=min(total_pages,current_page+1); st.rerun()
 
@@ -485,9 +523,9 @@ def main_app():
                     seleccionados = [idx for pos, idx in enumerate(page_df.index.tolist()) if pos < len(mask) and mask[pos]]
 
                     st.divider()
-                    c1,c2 = st.columns([2,1])
-                    nuevo_estado = c1.selectbox("Mover seleccionadas a:", [e for e in ESTADOS if e != estado], key=f"move_{estado}_{current_page}")
-                    mover = c2.button("Aplicar movimiento", type="primary", disabled=(len(seleccionados)==0), key=f"mover_{estado}_{current_page}")
+                    c7,c8 = st.columns([2,1])
+                    nuevo_estado = c7.selectbox("Mover seleccionadas a:", [e for e in ESTADOS if e != estado], key=f"move_{estado}_{current_page}")
+                    mover = c8.button("Aplicar movimiento", type="primary", disabled=(len(seleccionados)==0), key=f"mover_{estado}_{current_page}")
                     if mover:
                         ahora = pd.Timestamp(datetime.now())
                         for idx in seleccionados:
@@ -495,13 +533,13 @@ def main_app():
                             df.at[idx, "FechaMovimiento"] = ahora
                         ok, msg = guardar_inventario(df)
                         if ok:
-                            tag = "(guardado en Google Sheets)" if msg=="OK_SHEETS" else "(guardado local)"
+                            tag = "(Supabase)" if msg=="OK_SUPABASE" else "(Excel local)"
                             flash_success(f"✅ Cambios guardados — {len(seleccionados)} facturas movidas a {nuevo_estado} {tag}")
                             st.rerun()
                         else:
                             st.error(f"❌ Error guardando: {msg}")
 
-    # ===== Gestión =====
+    # ===== 📝 GESTIÓN =====
     with tab_gestion:
         show_flash()
         st.subheader("📝 Gestión")
@@ -510,7 +548,7 @@ def main_app():
         else:
             c1,c2 = st.columns([2,1])
             q_factura = c1.text_input("🔎 Buscar por Número de factura", key="buscar_factura_input")
-            buscar = c2.button("Buscar / Cargar", type="primary")
+            buscar = c2.button("Buscar / Cargar", type="primary", key="btn_buscar_gestion")
             if buscar and q_factura.strip():
                 st.session_state["factura_activa"] = q_factura.strip()
             numero_activo = st.session_state.get("factura_activa","")
@@ -575,7 +613,7 @@ def main_app():
                     no_radicado = f2.text_input("No Radicado", value=str(def_val["No Radicado"]), key="gestion_no_radicado")
                     valor_radicado_val = f2.text_input("Valor Radicado", value=(str(def_val["Valor Radicado"]) if pd.notna(def_val["Valor Radicado"]) else ""), key="gestion_valor_radicado")
 
-                    submit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True)
+                    submit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True, key="btn_form_guardar")
 
                 if submit:
                     ahora = pd.Timestamp(datetime.now())
@@ -589,8 +627,7 @@ def main_app():
                     frad_ts = pd.to_datetime(frad_widget) if estado_actual == "Radicada" else (pd.to_datetime(df.loc[idx2,"FechaRadicacion"]) if existe2 and "FechaRadicacion" in df.columns else pd.NaT)
 
                     mes_nuevo = (df.loc[idx2,"Mes"] if existe2 and "Mes" in df.columns else "")
-                    if pd.notna(frad_ts):
-                        mes_nuevo = MES_NOMBRE[int(frad_ts.month)]
+                    if pd.notna(frad_ts): mes_nuevo = MES_NOMBRE[int(frad_ts.month)]
 
                     estado_cambio = (estado_actual != estado_anterior) or (not existe2)
                     fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
@@ -606,11 +643,10 @@ def main_app():
                             nextn = 1
                         new_id = f"CHIA-{nextn:04d}"
 
-                    # Registro con TODAS tus columnas clave
                     registro = {
                         "ID": new_id,
                         "NumeroFactura": str(num_val).strip(),
-                        "Valor": float(valor_val),  # auxiliar
+                        "Valor": float(valor_val),
                         "EPS": str(eps_val).strip(),
                         "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
                         "Estado": estado_actual,
@@ -624,31 +660,27 @@ def main_app():
                         "Paciente": str(pac_val).strip() if pac_val is not None else "",
                         "No Radicado": str(no_radicado).strip() if no_radicado is not None else "",
                     }
-                    # Valor Radicado
                     if isinstance(valor_radicado_val, str):
                         registro["Valor Radicado"] = _parse_currency(valor_radicado_val)
                     else:
-                        try:
-                            registro["Valor Radicado"] = float(valor_radicado_val)
-                        except:
-                            registro["Valor Radicado"] = pd.NA
+                        try: registro["Valor Radicado"] = float(valor_radicado_val)
+                        except: registro["Valor Radicado"] = pd.NA
 
                     if existe2:
-                        for k,v in registro.items():
-                            df.at[idx2, k] = v
+                        for k,v in registro.items(): df.at[idx2, k] = v
                     else:
                         df = pd.concat([df, pd.DataFrame([registro])], ignore_index=True)
 
                     ok, msg = guardar_inventario(df, factura_verificar=registro["NumeroFactura"])
                     if ok:
-                        tag = "(guardado en Google Sheets)" if msg=="OK_SHEETS" else "(guardado local)"
+                        tag = "(Supabase)" if msg=="OK_SUPABASE" else "(Excel local)"
                         flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} {tag}")
                         st.session_state["factura_activa"] = ""
                         st.rerun()
                     else:
                         st.error(f"❌ No pude confirmar el guardado: {msg}")
 
-    # ===== Reportes =====
+    # ===== 📑 REPORTES =====
     with tab_reportes:
         show_flash()
         st.subheader("📑 Reportes")
@@ -707,8 +739,7 @@ def main_app():
                 with c2:
                     prefer_col = "Valor Radicado" if "Valor Radicado" in df.columns else "Valor"
                     df_rad = df[df.get("EstadoCanon","")=="Radicada"].copy()
-                    if prefer_col not in df_rad.columns:
-                        df_rad[prefer_col] = pd.NA
+                    if prefer_col not in df_rad.columns: df_rad[prefer_col] = pd.NA
                     g_val = df_rad.groupby("EPS", dropna=False)[prefer_col].sum().reset_index(name="Valor Radicado")
                     g_val = g_val.sort_values("Valor Radicado", ascending=False)
                     fig_val = px.bar(g_val, x="EPS", y="Valor Radicado", title="Valor radicado por EPS", text_auto=".2s")
@@ -769,7 +800,7 @@ def main_app():
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True, key="dl_rep_estado")
 
-    # ===== Avance =====
+    # ===== 📈 AVANCE =====
     with tab_avance:
         show_flash()
         st.subheader("📈 Avance (Real vs Proyectado — Acumulado)")
@@ -828,7 +859,10 @@ def main_app():
 if st.session_state.get("autenticado", False):
     main_app()
 else:
+    # Si no quieres login, comenta la siguiente línea y deja autenticado=True:
+    # st.session_state["autenticado"] = True; main_app()
     login()
+
 
 
 
