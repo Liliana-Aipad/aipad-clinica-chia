@@ -2,9 +2,12 @@ streamlit
 pandas
 plotly
 openpyxl
-reportlab
-kaleido
-requests
+filelock
+supabase
 gspread
-gspread_dataframe
 google-auth
+google-auth-oauthlib
+google-auth-httplib2
+oauth2client
+xlsxwriter
+
