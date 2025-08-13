@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-12 • Supabase snake_case + Excel fallback"
+APP_VERSION = "2025-08-12 • Supabase + Excel • Valor Factura / Valor Radicado"
 
 import os, io, re
 from datetime import datetime, date
@@ -38,7 +38,6 @@ MES_NOMBRE = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
 APP2DB = {
     "ID": "id",
     "NumeroFactura": "numero_factura",        # PK en DB
-    "Valor": "valor",
     "Valor Factura": "valor_factura",
     "Valor Radicado": "valor_radicado",
     "Fecha factura": "fecha_factura",
@@ -75,65 +74,53 @@ def _select_tab(label: str):
     """
     components.html(js, height=0, scrolling=False)
 
-# ====== Normalización / tipos ======
+# ====== Utilidades ======
 def _parse_currency(s):
     if pd.isna(s) or s == "": return pd.NA
-    txt = str(s).replace("$","").replace("\xa0","").replace(" ","")
-    txt = txt.replace(".","").replace(",",".")
-    try:
-        return float(txt)
-    except:
-        try:
-            return float(str(s).strip())
-        except:
-            return pd.NA
+    t = str(s).replace("$","").replace("\xa0","").replace(" ","")
+    t = t.replace(".","").replace(",",".")
+    try: return float(t)
+    except: 
+        try: return float(str(s).strip())
+        except: return pd.NA
 
 def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza tipos sin crear columna 'Valor'. 
+    Usamos explícitamente 'Valor Factura' y 'Valor Radicado' en cálculos/gráficos.
+    """
     df = df_in.copy()
 
-    # Valor auxiliar
-    if "Valor" not in df.columns:
-        if "Valor Factura" in df.columns:
-            df["Valor"] = df["Valor Factura"].apply(_parse_currency)
-        else:
-            df["Valor"] = pd.NA
-    else:
-        df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce")
-
-    # Valor Radicado
-    if "Valor Radicado" in df.columns:
-        df["Valor Radicado"] = df["Valor Radicado"].apply(_parse_currency)
+    # Asegurar columnas esperadas (aunque sea vacías)
+    for c in APP2DB.keys():
+        if c not in df.columns:
+            df[c] = pd.NA
 
     # Fechas
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", infer_datetime_format=True)
+        df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # Estado canon
-    if "Estado" in df.columns:
-        canon_map = {
-            "radicada":"Radicada","radicadas":"Radicada",
-            "pendiente":"Pendiente",
-            "auditada":"Auditada","auditadas":"Auditada",
-            "subsanada":"Subsanada","subsanadas":"Subsanada"
-        }
-        df["EstadoCanon"] = df["Estado"].astype(str).str.strip().str.lower().map(canon_map).fillna(df["Estado"])
-    else:
-        df["EstadoCanon"] = ""
+    # Números
+    # Valor Factura y Valor Radicado pueden venir con formato de texto
+    df["Valor Factura"] = df["Valor Factura"].apply(_parse_currency)
+    df["Valor Radicado"] = df["Valor Radicado"].apply(_parse_currency)
+    df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+
+    # Estado canon (para filtros)
+    canon_map = {
+        "radicada":"Radicada","radicadas":"Radicada",
+        "pendiente":"Pendiente",
+        "auditada":"Auditada","auditadas":"Auditada",
+        "subsanada":"Subsanada","subsanadas":"Subsanada"
+    }
+    df["EstadoCanon"] = df["Estado"].astype(str).str.strip().str.lower().map(canon_map).fillna(df["Estado"])
 
     # Mes desde FechaRadicacion si falta
-    if "Mes" not in df.columns:
-        df["Mes"] = pd.NA
-    if "FechaRadicacion" in df.columns:
-        vacios = df["Mes"].isna() | (df["Mes"].astype(str).str.strip()=="")
-        has_frad = df["FechaRadicacion"].notna()
-        need = vacios & has_frad
-        if need.any():
-            df.loc[need, "Mes"] = df.loc[need, "FechaRadicacion"].dt.month.map(MES_NOMBRE)
-
-    # Vigencia numérica
-    if "Vigencia" in df.columns:
-        df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+    vacios = df["Mes"].isna() | (df["Mes"].astype(str).str.strip()=="")
+    has_frad = df["FechaRadicacion"].notna()
+    need = vacios & has_frad
+    if need.any():
+        df.loc[need, "Mes"] = df.loc[need, "FechaRadicacion"].dt.month.map(MES_NOMBRE)
 
     df = df.dropna(how="all")
     return df
@@ -143,9 +130,6 @@ def _read_excel_local(path: str) -> pd.DataFrame:
     if not os.path.exists(path): return pd.DataFrame()
     try:
         df = pd.read_excel(path)
-        for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
-            if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
-        if "Vigencia" in df.columns: df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
         return df
     except Exception as e:
         st.error(f"Error leyendo Excel local: {e}")
@@ -174,14 +158,11 @@ except Exception:
     Client = None
 
 def _get_supabase() -> "Client|None":
-    """
-    Devuelve cliente Supabase si secrets están válidos; si no, None.
-    """
     try:
         cfg = st.secrets.get("supabase", {})
         url = (cfg.get("url") or "").strip()
         key = (cfg.get("anon_key") or "").strip()
-        if not url or not key:  # sin secretos → usar Excel
+        if not url or not key:
             return None
         if not url.startswith("https://") or ".supabase.co" not in url:
             st.info("Supabase: URL no válida en secrets. Usando Excel local.")
@@ -194,46 +175,43 @@ def _get_supabase() -> "Client|None":
         return None
 
 def _df_app_to_db(df_app: pd.DataFrame) -> pd.DataFrame:
-    """Renombra columnas del DF de la app a snake_case para la DB."""
     if df_app is None or df_app.empty:
         return pd.DataFrame()
     df = df_app.copy()
 
-    # Garantizar columnas esperadas de la app (aunque sea None)
+    # Garantizar columnas esperadas
     for app_col in APP2DB.keys():
         if app_col not in df.columns:
             df[app_col] = pd.NA
 
-    # Renombrar a snake_case
+    # Renombrar
     df = df.rename(columns=APP2DB)
 
     # Fechas → timestamp
     for c in ["fecha_factura","fecha_radicacion","fecha_movimiento"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+        df[c] = pd.to_datetime(df[c], errors="coerce")
 
     # Numéricos
-    if "vigencia" in df.columns:
-        df["vigencia"] = pd.to_numeric(df["vigencia"], errors="coerce")
+    for c in ["valor_factura","valor_radicado","vigencia"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     # NaN/NaT → None
     df = df.where(pd.notna(df), None)
     return df
 
 def _df_db_to_app(df_db: pd.DataFrame) -> pd.DataFrame:
-    """Renombra columnas snake_case de la DB a nombres usados por la app."""
     if df_db is None or df_db.empty:
         cols_min = list(APP2DB.keys())
         return pd.DataFrame(columns=cols_min)
     df = df_db.copy().rename(columns=DB2APP)
 
-    # Normaliza fechas
+    # Normaliza a tipos
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    # Tipos
-    if "Vigencia" in df.columns:
-        df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["Valor Factura","Valor Radicado"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
     return df
 
 def supabase_fetch_all() -> pd.DataFrame:
@@ -244,7 +222,7 @@ def supabase_fetch_all() -> pd.DataFrame:
     rows = res.data or []
     df_db = pd.DataFrame(rows)
     df_app = _df_db_to_app(df_db)
-    # asegurar todas las columnas que usa la app
+    # asegurar todas las columnas
     for k in APP2DB.keys():
         if k not in df_app.columns:
             df_app[k] = pd.NA
@@ -255,7 +233,6 @@ def supabase_upsert(df_app: pd.DataFrame, pk: str = DB_PK) -> tuple[bool, str]:
     if not sb:
         return False, "Supabase no configurado"
 
-    # nada que guardar
     if df_app is None or df_app.empty:
         return True, "OK_SUPABASE_NOOP"
 
@@ -263,11 +240,10 @@ def supabase_upsert(df_app: pd.DataFrame, pk: str = DB_PK) -> tuple[bool, str]:
     if df_db.empty or len(df_db.columns) == 0:
         return True, "OK_SUPABASE_NOOP"
 
-    # validar PK
     if pk not in df_db.columns:
-        return False, f"Falta la columna PK '{pk}' en los datos a guardar."
+        return False, f"Falta la columna PK '{pk}'"
     if df_db[pk].isna().any() or (df_db[pk].astype(str).str.strip()=="").any():
-        return False, f"Hay registros sin '{pk}' (obligatorio)."
+        return False, f"Hay registros sin '{pk}'"
 
     try:
         records = df_db.to_dict(orient="records")
@@ -275,15 +251,6 @@ def supabase_upsert(df_app: pd.DataFrame, pk: str = DB_PK) -> tuple[bool, str]:
         return True, "OK_SUPABASE"
     except Exception as e:
         return False, f"Error Supabase upsert: {e}"
-
-def supabase_delete_by_numero(numero: str) -> tuple[bool, str]:
-    sb = _get_supabase()
-    if not sb: return False, "Supabase no configurado"
-    try:
-        sb.table(DB_TABLE).delete().eq(DB_PK, str(numero)).execute()
-        return True, "OK_SUPABASE"
-    except Exception as e:
-        return False, f"Error Supabase delete: {e}"
 
 # ====== Carga/guardado central ======
 @st.cache_data
@@ -293,26 +260,29 @@ def load_data():
         sb = _get_supabase()
         if sb:
             df_app = supabase_fetch_all()
-            return normalize_dataframe(df_app)
+            if df_app is not None and len(df_app) > 0:
+                return normalize_dataframe(df_app)
+            else:
+                st.info("Supabase sin datos; usando Excel local.")
     except Exception as e:
         st.warning(f"No pude leer Supabase, uso Excel local: {e}")
 
-    # 2) Fallback: Excel
+    # 2) Excel local
     df_raw = _read_excel_local(INVENTARIO_LOCAL)
     if df_raw.empty:
         cols_min = list(APP2DB.keys())
-        return pd.DataFrame(columns=cols_min)
-    try:
-        return normalize_dataframe(df_raw)
-    except Exception:
-        return df_raw
+        return normalize_dataframe(pd.DataFrame(columns=cols_min))
+    return normalize_dataframe(df_raw)
 
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
     """Guarda en Supabase si está configurado; si no, en Excel. Luego verifica."""
     df_to_save = df.copy()
+
+    # Tipos antes de guardar
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
-        if c in df_to_save.columns:
-            df_to_save[c] = pd.to_datetime(df_to_save[c], errors="coerce")
+        df_to_save[c] = pd.to_datetime(df_to_save[c], errors="coerce")
+    for c in ["Valor Factura","Valor Radicado"]:
+        df_to_save[c] = pd.to_numeric(df_to_save[c], errors="coerce")
 
     # Supabase
     try:
@@ -348,7 +318,6 @@ def login():
         cedula = st.text_input("Cédula", key="login_cedula")
         contrasena = st.text_input("Contraseña", type="password", key="login_pwd")
         submitted = st.form_submit_button("Ingresar", use_container_width=True)
-
     if submitted:
         try:
             users = pd.read_excel(USUARIOS_FILE, dtype=str)
@@ -438,11 +407,6 @@ def main_app():
     # ===== Cargar para otras pestañas =====
     df = load_data()
     df_view = df.copy()
-    if "EstadoCanon" not in df_view.columns and "Estado" in df_view.columns:
-        df_view["EstadoCanon"] = df_view["Estado"].astype(str).str.strip().str.lower().map({
-            "radicada":"Radicada","radicadas":"Radicada",
-            "pendiente":"Pendiente","auditada":"Auditada","subsanada":"Subsanada"
-        }).fillna(df_view["Estado"])
 
     # ===== 📋 DASHBOARD =====
     with tab_dash:
@@ -451,14 +415,16 @@ def main_app():
             st.info("No hay datos en el inventario.")
         else:
             total = len(df)
-            radicadas = int((df_view.get("EstadoCanon", pd.Series(dtype=str))=="Radicada").sum())
-            total_valor = float(df.get("Valor", pd.Series(dtype=float)).fillna(0).sum())
+            radicadas = int((df.get("EstadoCanon", pd.Series(dtype=str))=="Radicada").sum())
+            total_valor_fact = float(df.get("Valor Factura", pd.Series(dtype=float)).fillna(0).sum())
+            total_valor_radic = float(df.get("Valor Radicado", pd.Series(dtype=float)).fillna(0).sum())
             avance = round((radicadas/total*100),2) if total else 0.0
 
-            c1,c2,c3 = st.columns(3)
+            c1,c2,c3,c4 = st.columns(4)
             c1.metric("📦 Total facturas", total)
-            c2.metric("💰 Valor total (Valor Factura)", f"${total_valor:,.0f}")
-            c3.metric("📊 Avance (radicadas)", f"{avance}%")
+            c2.metric("💰 Total facturado", f"${total_valor_fact:,.0f}")
+            c3.metric("🏦 Total radicado", f"${total_valor_radic:,.0f}")
+            c4.metric("📊 Avance (radicadas)", f"{avance}%")
 
             # Torta por Estado
             if {"Estado","NumeroFactura"}.issubset(df.columns):
@@ -485,10 +451,8 @@ def main_app():
                     )
                     st.plotly_chart(fig_funnel, use_container_width=True, key="dash_eps_funnel")
                 with e2:
-                    prefer_col = "Valor Radicado" if "Valor Radicado" in df.columns else "Valor"
-                    df_rad = df_view[df_view["EstadoCanon"]=="Radicada"].copy()
-                    if prefer_col not in df_rad.columns: df_rad[prefer_col] = pd.NA
-                    g_val = df_rad.groupby("EPS", dropna=False)[prefer_col].sum().reset_index(name="ValorRadicado")
+                    df_rad = df[df.get("EstadoCanon","")=="Radicada"].copy()
+                    g_val = df_rad.groupby("EPS", dropna=False)["Valor Radicado"].sum().reset_index(name="ValorRadicado")
                     g_val = g_val.sort_values("ValorRadicado", ascending=False)
                     fig_eps_val = px.bar(g_val, x="EPS", y="ValorRadicado",
                                          title="Valor radicado por EPS (solo Radicadas)",
@@ -499,12 +463,14 @@ def main_app():
             # Vigencia
             st.markdown("## 📆 Por Vigencia")
             v1,v2 = st.columns(2)
-            if {"Vigencia","Estado","Valor","NumeroFactura"}.issubset(df.columns):
+            if {"Vigencia","Estado","NumeroFactura"}.issubset(df.columns):
                 with v1:
-                    fig_vig_val = px.bar(df, x="Vigencia", y="Valor", color="Estado",
-                                         title="Valor por Vigencia (por Estado)",
-                                         barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s")
-                    st.plotly_chart(fig_vig_val, use_container_width=True, key="dash_vig_val")
+                    fig_vig_val = px.bar(
+                        df, x="Vigencia", y="Valor Factura", color="Estado",
+                        title="Valor Factura por Vigencia (por Estado)",
+                        barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s"
+                    )
+                    st.plotly_chart(fig_vig_val, use_container_width=True, key="dash_vig_valfact")
                 with v2:
                     g_vig_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cantidad")
                     fig_vig_donut = px.pie(g_vig_cnt, names="Vigencia", values="Cantidad",
@@ -514,28 +480,33 @@ def main_app():
 
             st.divider()
             # Descargar dashboard a Excel
-            def exportar_dashboard_excel(df, df_view):
+            def exportar_dashboard_excel(df):
                 out = io.BytesIO()
                 total = len(df)
-                rad = int((df_view.get("EstadoCanon", pd.Series(dtype=str))=="Radicada").sum())
-                total_val = float(df.get("Valor", pd.Series(dtype=float)).fillna(0).sum())
+                rad = int((df.get("EstadoCanon", pd.Series(dtype=str))=="Radicada").sum())
+                total_fact = float(df["Valor Factura"].fillna(0).sum())
+                total_radic = float(df["Valor Radicado"].fillna(0).sum())
                 avance = round((rad/total*100),2) if total else 0.0
                 with pd.ExcelWriter(out, engine="openpyxl") as w:
-                    pd.DataFrame({"Métrica":["Total facturas","Valor total (Valor Factura)","% Avance (radicadas)"],
-                                  "Valor":[total,total_val,avance]}).to_excel(w, index=False, sheet_name="Resumen")
+                    pd.DataFrame({
+                        "Métrica":["Total facturas","Total facturado","Total radicado","% Avance (radicadas)"],
+                        "Valor":[total,total_fact,total_radic,avance]
+                    }).to_excel(w, index=False, sheet_name="Resumen")
                     if "EPS" in df.columns:
                         df.groupby("EPS", dropna=False).agg(
                             N_Facturas=("NumeroFactura","count"),
-                            Valor_Total=("Valor","sum")
+                            Valor_Facturado=("Valor Factura","sum"),
+                            Valor_Radicado=("Valor Radicado","sum")
                         ).reset_index().to_excel(w, index=False, sheet_name="Por_EPS")
                     if "Vigencia" in df.columns:
                         df.groupby("Vigencia", dropna=False).agg(
                             N_Facturas=("NumeroFactura","count"),
-                            Valor_Total=("Valor","sum")
+                            Valor_Facturado=("Valor Factura","sum"),
+                            Valor_Radicado=("Valor Radicado","sum")
                         ).reset_index().to_excel(w, index=False, sheet_name="Por_Vigencia")
                 return out.getvalue()
             st.download_button("⬇️ Descargar Dashboard a Excel",
-                               data=exportar_dashboard_excel(df, df_view),
+                               data=exportar_dashboard_excel(df),
                                file_name="dashboard_radicacion.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True,
@@ -589,7 +560,7 @@ def main_app():
 
                     st.divider()
                     sel_all = st.checkbox("Seleccionar todo (esta página)", key=f"selall_{estado}_{current_page}", value=False)
-                    cols = ["ID","NumeroFactura","EPS","Vigencia","Valor","FechaRadicacion","FechaMovimiento","Observaciones"]
+                    cols = ["ID","NumeroFactura","EPS","Vigencia","Valor Factura","Valor Radicado","FechaRadicacion","FechaMovimiento","Observaciones"]
                     view = page_df.reindex(columns=[c for c in cols if c in page_df.columns]).copy()
                     view.insert(0,"Seleccionar", sel_all)
                     edited = st.data_editor(view, hide_index=True, use_container_width=True, num_rows="fixed",
@@ -647,7 +618,6 @@ def main_app():
                 def_val = {
                     "ID": getv(fila,"ID",""),
                     "NumeroFactura": str(getv(fila,"NumeroFactura", numero_activo) or numero_activo),
-                    "Valor": float(getv(fila,"Valor",0) or 0.0),
                     "EPS": str(getv(fila,"EPS","") or ""),
                     "Vigencia": getv(fila,"Vigencia",""),
                     "Estado": str(getv(fila,"Estado","Pendiente") or "Pendiente"),
@@ -660,6 +630,7 @@ def main_app():
                     "Documento": str(getv(fila,"Documento","") or ""),
                     "Paciente": str(getv(fila,"Paciente","") or ""),
                     "No Radicado": str(getv(fila,"No Radicado","") or ""),
+                    "Valor Factura": getv(fila,"Valor Factura", pd.NA),
                     "Valor Radicado": getv(fila,"Valor Radicado", pd.NA),
                 }
 
@@ -678,19 +649,22 @@ def main_app():
                     f1, f2 = st.columns(2)
                     # Básicos
                     num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"], key="gestion_num_factura")
-                    valor_val = f1.number_input("Valor (Valor Factura)", min_value=0.0, step=1000.0, value=float(def_val["Valor"]), key="gestion_valor")
                     eps_val = f1.text_input("EPS", value=def_val["EPS"], key="gestion_eps")
-                    # Extras izquierda
+
+                    # Valores y extras izquierda
+                    valor_fact = f1.text_input("Valor Factura", value=(str(def_val["Valor Factura"]) if pd.notna(def_val["Valor Factura"]) else ""), key="gestion_valor_factura")
+                    valor_radic = f1.text_input("Valor Radicado", value=(str(def_val["Valor Radicado"]) if pd.notna(def_val["Valor Radicado"]) else ""), key="gestion_valor_radicado")
+
                     fecha_fact = f1.date_input("Fecha factura",
                                                value=(def_val["Fecha factura"].date() if isinstance(def_val["Fecha factura"], pd.Timestamp) and pd.notna(def_val["Fecha factura"]) else date.today()),
                                                key="gestion_fecha_factura")
-                    doc_val = f1.text_input("Documento", value=str(def_val["Documento"]), key="gestion_documento")
-                    pac_val = f1.text_input("Paciente", value=str(def_val["Paciente"]), key="gestion_paciente")
+
                     # Derecha
                     vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]), key="gestion_vigencia")
                     obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100, key="gestion_obs")
+                    doc_val = f2.text_input("Documento", value=str(def_val["Documento"]), key="gestion_documento")
+                    pac_val = f2.text_input("Paciente", value=str(def_val["Paciente"]), key="gestion_paciente")
                     no_radicado = f2.text_input("No Radicado", value=str(def_val["No Radicado"]), key="gestion_no_radicado")
-                    valor_radicado_val = f2.text_input("Valor Radicado", value=(str(def_val["Valor Radicado"]) if pd.notna(def_val["Valor Radicado"]) else ""), key="gestion_valor_radicado")
 
                     submit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True, key="btn_form_guardar")
 
@@ -722,10 +696,13 @@ def main_app():
                             nextn = 1
                         new_id = f"CHIA-{nextn:04d}"
 
+                    # Normalizar valores monetarios
+                    v_fact = _parse_currency(valor_fact)
+                    v_radic = _parse_currency(valor_radic)
+
                     registro = {
                         "ID": new_id,
                         "NumeroFactura": str(num_val).strip(),
-                        "Valor": float(valor_val),
                         "EPS": str(eps_val).strip(),
                         "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
                         "Estado": estado_actual,
@@ -733,17 +710,13 @@ def main_app():
                         "FechaMovimiento": fecha_mov,
                         "Observaciones": str(obs_val).strip(),
                         "Mes": mes_nuevo,
-                        # Extras
                         "Fecha factura": pd.to_datetime(fecha_fact) if fecha_fact else pd.NaT,
                         "Documento": str(doc_val).strip() if doc_val is not None else "",
                         "Paciente": str(pac_val).strip() if pac_val is not None else "",
                         "No Radicado": str(no_radicado).strip() if no_radicado is not None else "",
+                        "Valor Factura": v_fact,
+                        "Valor Radicado": v_radic,
                     }
-                    if isinstance(valor_radicado_val, str):
-                        registro["Valor Radicado"] = _parse_currency(valor_radicado_val)
-                    else:
-                        try: registro["Valor Radicado"] = float(valor_radicado_val)
-                        except: registro["Valor Radicado"] = pd.NA
 
                     if existe2:
                         for k,v in registro.items(): df.at[idx2, k] = v
@@ -771,7 +744,8 @@ def main_app():
             def agg_eps(data: pd.DataFrame) -> pd.DataFrame:
                 g = data.groupby("EPS", dropna=False).agg(
                     Cuentas=("NumeroFactura","count"),
-                    Valor=("Valor","sum"),
+                    Valor_Facturado=("Valor Factura","sum"),
+                    Valor_Radicado=("Valor Radicado","sum"),
                     Radicadas=("Estado", lambda x: (x=="Radicada").sum())
                 ).reset_index().fillna(0)
                 g["% Avance"] = (g["Radicadas"] / g["Cuentas"].where(g["Cuentas"]!=0, pd.NA) * 100).fillna(0).round(2)
@@ -780,7 +754,8 @@ def main_app():
             def agg_vig(data: pd.DataFrame) -> pd.DataFrame:
                 g = data.groupby("Vigencia", dropna=False).agg(
                     Cuentas=("NumeroFactura","count"),
-                    Valor=("Valor","sum"),
+                    Valor_Facturado=("Valor Factura","sum"),
+                    Valor_Radicado=("Valor Radicado","sum"),
                     Radicadas=("Estado", lambda x: (x=="Radicada").sum())
                 ).reset_index().fillna(0)
                 g["% Avance"] = (g["Radicadas"] / g["Cuentas"].where(g["Cuentas"]!=0, pd.NA) * 100).fillna(0).round(2)
@@ -789,7 +764,8 @@ def main_app():
             def agg_estado(data: pd.DataFrame) -> pd.DataFrame:
                 g = data.groupby("Estado", dropna=False).agg(
                     Cuentas=("NumeroFactura","count"),
-                    Valor=("Valor","sum")
+                    Valor_Facturado=("Valor Factura","sum"),
+                    Valor_Radicado=("Valor Radicado","sum")
                 ).reset_index().fillna(0)
                 return g.sort_values("Cuentas", ascending=False)
 
@@ -805,7 +781,7 @@ def main_app():
                 st.dataframe(tabla, use_container_width=True, key="tabla_por_eps")
 
                 c1, c2 = st.columns(2)
-                total_cnt = int(tabla["Cuentas"].sum())
+                total_cnt = int(tabla["Cuentas"].sum()) if not tabla.empty else 0
                 tabla_plot = tabla.copy()
                 tabla_plot["%"] = (tabla_plot["Cuentas"]/total_cnt*100).round(1) if total_cnt else 0
                 with c1:
@@ -816,10 +792,8 @@ def main_app():
                     )
                     st.plotly_chart(fig_funnel, use_container_width=True, key="rep_eps_funnel")
                 with c2:
-                    prefer_col = "Valor Radicado" if "Valor Radicado" in df.columns else "Valor"
                     df_rad = df[df.get("EstadoCanon","")=="Radicada"].copy()
-                    if prefer_col not in df_rad.columns: df_rad[prefer_col] = pd.NA
-                    g_val = df_rad.groupby("EPS", dropna=False)[prefer_col].sum().reset_index(name="Valor Radicado")
+                    g_val = df_rad.groupby("EPS", dropna=False)["Valor Radicado"].sum().reset_index(name="Valor Radicado")
                     g_val = g_val.sort_values("Valor Radicado", ascending=False)
                     fig_val = px.bar(g_val, x="EPS", y="Valor Radicado", title="Valor radicado por EPS", text_auto=".2s")
                     fig_val.update_layout(xaxis={'categoryorder':'total descending'})
@@ -838,10 +812,10 @@ def main_app():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_vig_val = px.bar(df, x="Vigencia", y="Valor", color="Estado",
-                                         title="Valor por Vigencia (por Estado)",
+                    fig_vig_val = px.bar(df, x="Vigencia", y="Valor Factura", color="Estado",
+                                         title="Valor Factura por Vigencia (por Estado)",
                                          barmode="group", color_discrete_map=ESTADO_COLORES, text_auto=".2s")
-                    st.plotly_chart(fig_vig_val, use_container_width=True, key="rep_vig_val")
+                    st.plotly_chart(fig_vig_val, use_container_width=True, key="rep_vig_valfact")
                 with c2:
                     g_cnt = df.groupby("Vigencia", dropna=False)["NumeroFactura"].count().reset_index(name="Cuentas")
                     fig_vig_donut = px.pie(g_cnt, names="Vigencia", values="Cuentas",
@@ -938,9 +912,10 @@ def main_app():
 if st.session_state.get("autenticado", False):
     main_app()
 else:
-    # Si no quieres login, descomenta la línea siguiente:
+    # Si no quieres login, descomenta la línea siguiente para omitirlo:
     # st.session_state["autenticado"] = True; main_app()
     login()
+
 
 
 
