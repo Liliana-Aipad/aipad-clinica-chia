@@ -1,30 +1,63 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-12 • Supabase auto + Excel fallback"
-
-import streamlit as st
-st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
+APP_VERSION = "2025-08-12 • Supabase snake_case + Excel fallback"
 
 import os, io, re
 from datetime import datetime, date
 import pandas as pd
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
-from filelock import FileLock, Timeout
 
-# ========== Constantes y archivos ==========
+st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
+
+# ====== Bloqueo de archivo (parche si falta filelock) ======
+try:
+    from filelock import FileLock, Timeout
+except Exception:
+    class FileLock:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+    class Timeout(Exception): pass
+
+# ====== Constantes de archivos ======
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVENTARIO_LOCAL = os.path.join(BASE_DIR, "inventario_cuentas.xlsx")
 INVENTARIO_LOCK  = INVENTARIO_LOCAL + ".lock"
-USUARIOS_FILE    = os.path.join(BASE_DIR, "usuarios.xlsx")
+USUARIOS_FILE    = os.path.join(BASE_DIR, "usuarios.xlsx")  # opcional (login)
 
+# ====== Catálogos / colores ======
 ESTADOS = ["Pendiente","Auditada","Subsanada","Radicada"]
 ESTADO_COLORES = {"Radicada":"green","Pendiente":"red","Auditada":"orange","Subsanada":"blue"}
 MES_NOMBRE = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
               7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
-# ========== Helpers de UI ==========
+# ====== Mapeos App (encabezados bonitos) ↔ DB (snake_case) ======
+APP2DB = {
+    "ID": "id",
+    "NumeroFactura": "numero_factura",        # PK en DB
+    "Valor": "valor",
+    "Valor Factura": "valor_factura",
+    "Valor Radicado": "valor_radicado",
+    "Fecha factura": "fecha_factura",
+    "EPS": "eps",
+    "Documento": "documento",
+    "Paciente": "paciente",
+    "Vigencia": "vigencia",
+    "Estado": "estado",
+    "FechaMovimiento": "fecha_movimiento",
+    "FechaRadicacion": "fecha_radicacion",
+    "No Radicado": "no_radicado",
+    "Mes": "mes",
+    "Observaciones": "observaciones",
+}
+DB2APP = {v: k for k, v in APP2DB.items()}
+DB_TABLE = "inventario"
+DB_PK = "numero_factura"  # clave primaria en DB
+
+# ====== Helpers UI ======
 def flash_success(msg: str): st.session_state["_flash_ok"] = msg
 def show_flash():
     msg = st.session_state.pop("_flash_ok", None)
@@ -42,7 +75,7 @@ def _select_tab(label: str):
     """
     components.html(js, height=0, scrolling=False)
 
-# ========== Normalización / tipos ==========
+# ====== Normalización / tipos ======
 def _parse_currency(s):
     if pd.isna(s) or s == "": return pd.NA
     txt = str(s).replace("$","").replace("\xa0","").replace(" ","")
@@ -56,13 +89,6 @@ def _parse_currency(s):
             return pd.NA
 
 def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
-    """
-    Mantiene TODAS tus columnas y crea auxiliares que la app usa:
-    - Valor (desde 'Valor Factura' si existe)
-    - EstadoCanon (para gráficas)
-    - Fechas y vigencia a tipos correctos
-    - Mes desde FechaRadicacion si no viene
-    """
     df = df_in.copy()
 
     # Valor auxiliar
@@ -105,15 +131,14 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
         if need.any():
             df.loc[need, "Mes"] = df.loc[need, "FechaRadicacion"].dt.month.map(MES_NOMBRE)
 
-    # Vigencia numérica (si se puede)
+    # Vigencia numérica
     if "Vigencia" in df.columns:
         df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
 
-    # Quitar filas 100% vacías
     df = df.dropna(how="all")
     return df
 
-# ========== Excel local (fallback / también funciona como fuente principal) ==========
+# ====== Excel local (fallback / o fuente principal) ======
 def _read_excel_local(path: str) -> pd.DataFrame:
     if not os.path.exists(path): return pd.DataFrame()
     try:
@@ -141,7 +166,7 @@ def _write_excel_local(df: pd.DataFrame, path: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Error guardando Excel local: {e}"
 
-# ========== Supabase (auto persistencia si hay claves) ==========
+# ====== Supabase (cliente + mapeo snake_case) ======
 try:
     from supabase import create_client, Client
 except Exception:
@@ -149,48 +174,104 @@ except Exception:
     Client = None
 
 def _get_supabase() -> "Client|None":
+    """
+    Devuelve cliente Supabase si secrets están válidos; si no, None.
+    """
     try:
         cfg = st.secrets.get("supabase", {})
-        url = cfg.get("url"); key = cfg.get("anon_key")
-        if not url or not key or not create_client: return None
+        url = (cfg.get("url") or "").strip()
+        key = (cfg.get("anon_key") or "").strip()
+        if not url or not key:  # sin secretos → usar Excel
+            return None
+        if not url.startswith("https://") or ".supabase.co" not in url:
+            st.info("Supabase: URL no válida en secrets. Usando Excel local.")
+            return None
+        if not create_client:
+            st.info("Supabase: librería no disponible. Usando Excel local.")
+            return None
         return create_client(url, key)
     except Exception:
         return None
 
-def _df_to_records(df: pd.DataFrame) -> list[dict]:
-    out = []
-    for _, row in df.iterrows():
-        rec = {}
-        for col, val in row.items():
-            if isinstance(val, (pd.Timestamp, datetime)):
-                rec[col] = None if pd.isna(val) else pd.to_datetime(val).to_pydatetime().isoformat()
-            else:
-                rec[col] = None if (isinstance(val, float) and pd.isna(val)) or pd.isna(val) else val
-        out.append(rec)
-    return out
+def _df_app_to_db(df_app: pd.DataFrame) -> pd.DataFrame:
+    """Renombra columnas del DF de la app a snake_case para la DB."""
+    if df_app is None or df_app.empty:
+        return pd.DataFrame()
+    df = df_app.copy()
+
+    # Garantizar columnas esperadas de la app (aunque sea None)
+    for app_col in APP2DB.keys():
+        if app_col not in df.columns:
+            df[app_col] = pd.NA
+
+    # Renombrar a snake_case
+    df = df.rename(columns=APP2DB)
+
+    # Fechas → timestamp
+    for c in ["fecha_factura","fecha_radicacion","fecha_movimiento"]:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+
+    # Numéricos
+    if "vigencia" in df.columns:
+        df["vigencia"] = pd.to_numeric(df["vigencia"], errors="coerce")
+
+    # NaN/NaT → None
+    df = df.where(pd.notna(df), None)
+    return df
+
+def _df_db_to_app(df_db: pd.DataFrame) -> pd.DataFrame:
+    """Renombra columnas snake_case de la DB a nombres usados por la app."""
+    if df_db is None or df_db.empty:
+        cols_min = list(APP2DB.keys())
+        return pd.DataFrame(columns=cols_min)
+    df = df_db.copy().rename(columns=DB2APP)
+
+    # Normaliza fechas
+    for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    # Tipos
+    if "Vigencia" in df.columns:
+        df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
+    return df
 
 def supabase_fetch_all() -> pd.DataFrame:
     sb = _get_supabase()
-    if not sb: raise RuntimeError("Supabase no configurado")
-    res = sb.table("inventario").select("*").execute()
+    if not sb:
+        raise RuntimeError("Supabase no configurado")
+    res = sb.table(DB_TABLE).select("*").execute()
     rows = res.data or []
-    df = pd.DataFrame(rows)
-    for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
-        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
-    if "Vigencia" in df.columns: df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
-    # asegurar columnas típicas
-    cols_all = ["id","NumeroFactura","Valor","Valor Factura","Valor Radicado","Fecha factura","EPS","Documento","Paciente",
-                "Vigencia","Estado","FechaMovimiento","FechaRadicacion","No Radicado","Mes","Observaciones","EstadoCanon"]
-    for c in cols_all:
-        if c not in df.columns: df[c] = pd.NA
-    return df
+    df_db = pd.DataFrame(rows)
+    df_app = _df_db_to_app(df_db)
+    # asegurar todas las columnas que usa la app
+    for k in APP2DB.keys():
+        if k not in df_app.columns:
+            df_app[k] = pd.NA
+    return df_app
 
-def supabase_upsert(df: pd.DataFrame, pk: str = "NumeroFactura") -> tuple[bool, str]:
+def supabase_upsert(df_app: pd.DataFrame, pk: str = DB_PK) -> tuple[bool, str]:
     sb = _get_supabase()
-    if not sb: return False, "Supabase no configurado"
+    if not sb:
+        return False, "Supabase no configurado"
+
+    # nada que guardar
+    if df_app is None or df_app.empty:
+        return True, "OK_SUPABASE_NOOP"
+
+    df_db = _df_app_to_db(df_app)
+    if df_db.empty or len(df_db.columns) == 0:
+        return True, "OK_SUPABASE_NOOP"
+
+    # validar PK
+    if pk not in df_db.columns:
+        return False, f"Falta la columna PK '{pk}' en los datos a guardar."
+    if df_db[pk].isna().any() or (df_db[pk].astype(str).str.strip()=="").any():
+        return False, f"Hay registros sin '{pk}' (obligatorio)."
+
     try:
-        records = _df_to_records(df)
-        sb.table("inventario").upsert(records, on_conflict=pk).execute()
+        records = df_db.to_dict(orient="records")
+        sb.table(DB_TABLE).upsert(records, on_conflict=pk).execute()
         return True, "OK_SUPABASE"
     except Exception as e:
         return False, f"Error Supabase upsert: {e}"
@@ -199,28 +280,27 @@ def supabase_delete_by_numero(numero: str) -> tuple[bool, str]:
     sb = _get_supabase()
     if not sb: return False, "Supabase no configurado"
     try:
-        sb.table("inventario").delete().eq("NumeroFactura", str(numero)).execute()
+        sb.table(DB_TABLE).delete().eq(DB_PK, str(numero)).execute()
         return True, "OK_SUPABASE"
     except Exception as e:
         return False, f"Error Supabase delete: {e}"
 
-# ========== Carga/guardado central ==========
+# ====== Carga/guardado central ======
 @st.cache_data
 def load_data():
     # 1) Intentar Supabase
     try:
         sb = _get_supabase()
         if sb:
-            df_raw = supabase_fetch_all()
-            return normalize_dataframe(df_raw)
+            df_app = supabase_fetch_all()
+            return normalize_dataframe(df_app)
     except Exception as e:
         st.warning(f"No pude leer Supabase, uso Excel local: {e}")
 
-    # 2) Fallback: Excel local
+    # 2) Fallback: Excel
     df_raw = _read_excel_local(INVENTARIO_LOCAL)
     if df_raw.empty:
-        cols_min = ["ID","NumeroFactura","Valor","EPS","Vigencia","Estado","Mes","FechaRadicacion","FechaMovimiento","Observaciones",
-                    "Valor Factura","Fecha factura","Documento","Paciente","No Radicado","Valor Radicado"]
+        cols_min = list(APP2DB.keys())
         return pd.DataFrame(columns=cols_min)
     try:
         return normalize_dataframe(df_raw)
@@ -228,38 +308,40 @@ def load_data():
         return df_raw
 
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
-    """Guarda en Supabase si está configurado; si no, en Excel local. Luego verifica lectura."""
+    """Guarda en Supabase si está configurado; si no, en Excel. Luego verifica."""
     df_to_save = df.copy()
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
         if c in df_to_save.columns:
             df_to_save[c] = pd.to_datetime(df_to_save[c], errors="coerce")
 
-    # Intento Supabase
+    # Supabase
     try:
         sb = _get_supabase()
         if sb:
-            ok, msg = supabase_upsert(df_to_save, pk="NumeroFactura")
+            ok, msg = supabase_upsert(df_to_save, pk=DB_PK)
             if not ok: return False, msg
             st.cache_data.clear()
             if factura_verificar:
                 df_new = load_data()
                 ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
-                if not ok_row: return False, f"Guardó en Supabase, pero la factura {factura_verificar} no aparece al releer."
+                if not ok_row:
+                    return False, f"Guardó en Supabase, pero la factura {factura_verificar} no aparece al releer."
             return True, "OK_SUPABASE"
     except Exception as e:
         st.warning(f"No pude guardar en Supabase, intento Excel local: {e}")
 
-    # Fallback Excel
+    # Excel
     ok, msg = _write_excel_local(df_to_save, INVENTARIO_LOCAL)
     if not ok: return False, msg
     st.cache_data.clear()
     if factura_verificar:
         df_new = load_data()
         ok_row = df_new["NumeroFactura"].astype(str).str.strip().eq(str(factura_verificar).strip()).any()
-        if not ok_row: return False, f"Guardó en Excel, pero la factura {factura_verificar} no aparece al releer."
+        if not ok_row:
+            return False, f"Guardó en Excel, pero la factura {factura_verificar} no aparece al releer."
     return True, "OK_LOCAL"
 
-# ========== Login (opcional con usuarios.xlsx) ==========
+# ====== Login opcional ======
 def login():
     st.sidebar.title("🔐 Ingreso")
     with st.sidebar.form("login_form", clear_on_submit=False):
@@ -281,7 +363,7 @@ def login():
         except Exception as e:
             st.sidebar.error(f"Error cargando usuarios: {e}\n\nSi no usas login, comenta esta sección y deja `autenticado=True`.")
 
-# ========== App ==========
+# ====== App principal ======
 def main_app():
     st.caption(f"🆔 Versión: {APP_VERSION}")
     st.title("📊 AIPAD • Control de Radicación")
@@ -298,7 +380,6 @@ def main_app():
         show_flash()
         st.subheader("📄 Tabla (inventario base)")
 
-        # Subir Excel para reemplazar
         up = st.file_uploader("Sube un Excel (.xlsx) con el inventario", type=["xlsx"], accept_multiple_files=False, key="uploader_tabla")
         c1, c2, c3 = st.columns([1,1,1])
         if c1.button("📥 Cargar Excel (reemplazar)", use_container_width=True, type="secondary", disabled=(up is None), key="btn_cargar_excel"):
@@ -316,7 +397,7 @@ def main_app():
 
         df_live = load_data().copy()
         st.caption(f"Registros actuales: **{len(df_live)}**")
-        st.info("Puedes editar directamente en la tabla. Luego pulsa **Guardar cambios en Excel**.")
+        st.info("Puedes editar directamente en la tabla. Luego pulsa **Guardar cambios en Excel/DB**.")
         edited = st.data_editor(
             df_live,
             use_container_width=True,
@@ -354,15 +435,13 @@ def main_app():
             key="dl_inventario_actual"
         )
 
-    # ===== cargar una vez para las demás pestañas =====
+    # ===== Cargar para otras pestañas =====
     df = load_data()
     df_view = df.copy()
     if "EstadoCanon" not in df_view.columns and "Estado" in df_view.columns:
         df_view["EstadoCanon"] = df_view["Estado"].astype(str).str.strip().str.lower().map({
             "radicada":"Radicada","radicadas":"Radicada",
-            "pendiente":"Pendiente",
-            "auditada":"Auditada","auditadas":"Auditada",
-            "subsanada":"Subsanada","subsanadas":"Subsanada"
+            "pendiente":"Pendiente","auditada":"Auditada","subsanada":"Subsanada"
         }).fillna(df_view["Estado"])
 
     # ===== 📋 DASHBOARD =====
@@ -855,13 +934,14 @@ def main_app():
             k2.metric("Reales acumuladas", f"{int(comp['Cuentas reales'].sum()):,}")
             k3.metric("Avance total vs meta", f"{(comp['Cuentas reales'].sum()/total_meta*100 if total_meta else 0):.1f}%")
 
-# ===== Boot =====
+# ====== Arranque ======
 if st.session_state.get("autenticado", False):
     main_app()
 else:
-    # Si no quieres login, comenta la siguiente línea y deja autenticado=True:
+    # Si no quieres login, descomenta la línea siguiente:
     # st.session_state["autenticado"] = True; main_app()
     login()
+
 
 
 
