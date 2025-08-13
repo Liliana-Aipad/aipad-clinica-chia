@@ -1,6 +1,6 @@
 # app_streamlit.py
 # -*- coding: utf-8 -*-
-APP_VERSION = "2025-08-12 • Supabase + Excel • Valor Factura / Valor Radicado"
+APP_VERSION = "2025-08-12 • Compat submit • Supabase + Excel • Valor Factura / Valor Radicado"
 
 import os, io, re
 from datetime import datetime, date
@@ -11,6 +11,15 @@ import plotly.graph_objects as go
 import streamlit.components.v1 as components
 
 st.set_page_config(layout="wide", page_title="AIPAD • Control de Radicación")
+
+# ========= Helper de compatibilidad (evita TypeError en form_submit_button) =========
+def form_submit_button_compat(label, key=None):
+    """Botón submit compatible con versiones antiguas de Streamlit."""
+    try:
+        return st.form_submit_button(label, type="primary", use_container_width=True, key=key)
+    except TypeError:
+        # Para versiones antiguas que no aceptan type/use_container_width
+        return st.form_submit_button(label, key=key)
 
 # ====== Bloqueo de archivo (parche si falta filelock) ======
 try:
@@ -90,23 +99,18 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
     Usamos explícitamente 'Valor Factura' y 'Valor Radicado' en cálculos/gráficos.
     """
     df = df_in.copy()
-
     # Asegurar columnas esperadas (aunque sea vacías)
     for c in APP2DB.keys():
         if c not in df.columns:
             df[c] = pd.NA
-
     # Fechas
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
-
     # Números
-    # Valor Factura y Valor Radicado pueden venir con formato de texto
     df["Valor Factura"] = df["Valor Factura"].apply(_parse_currency)
     df["Valor Radicado"] = df["Valor Radicado"].apply(_parse_currency)
     df["Vigencia"] = pd.to_numeric(df["Vigencia"], errors="coerce")
-
-    # Estado canon (para filtros)
+    # Estado canon
     canon_map = {
         "radicada":"Radicada","radicadas":"Radicada",
         "pendiente":"Pendiente",
@@ -114,23 +118,19 @@ def normalize_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
         "subsanada":"Subsanada","subsanadas":"Subsanada"
     }
     df["EstadoCanon"] = df["Estado"].astype(str).str.strip().str.lower().map(canon_map).fillna(df["Estado"])
-
     # Mes desde FechaRadicacion si falta
     vacios = df["Mes"].isna() | (df["Mes"].astype(str).str.strip()=="")
     has_frad = df["FechaRadicacion"].notna()
     need = vacios & has_frad
     if need.any():
         df.loc[need, "Mes"] = df.loc[need, "FechaRadicacion"].dt.month.map(MES_NOMBRE)
-
-    df = df.dropna(how="all")
-    return df
+    return df.dropna(how="all")
 
 # ====== Excel local (fallback / o fuente principal) ======
 def _read_excel_local(path: str) -> pd.DataFrame:
     if not os.path.exists(path): return pd.DataFrame()
     try:
-        df = pd.read_excel(path)
-        return df
+        return pd.read_excel(path)
     except Exception as e:
         st.error(f"Error leyendo Excel local: {e}")
         return pd.DataFrame()
@@ -162,8 +162,7 @@ def _get_supabase() -> "Client|None":
         cfg = st.secrets.get("supabase", {})
         url = (cfg.get("url") or "").strip()
         key = (cfg.get("anon_key") or "").strip()
-        if not url or not key:
-            return None
+        if not url or not key: return None
         if not url.startswith("https://") or ".supabase.co" not in url:
             st.info("Supabase: URL no válida en secrets. Usando Excel local.")
             return None
@@ -175,38 +174,26 @@ def _get_supabase() -> "Client|None":
         return None
 
 def _df_app_to_db(df_app: pd.DataFrame) -> pd.DataFrame:
-    if df_app is None or df_app.empty:
-        return pd.DataFrame()
+    if df_app is None or df_app.empty: return pd.DataFrame()
     df = df_app.copy()
-
-    # Garantizar columnas esperadas
     for app_col in APP2DB.keys():
-        if app_col not in df.columns:
-            df[app_col] = pd.NA
-
-    # Renombrar
+        if app_col not in df.columns: df[app_col] = pd.NA
     df = df.rename(columns=APP2DB)
-
     # Fechas → timestamp
     for c in ["fecha_factura","fecha_radicacion","fecha_movimiento"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
-
     # Numéricos
     for c in ["valor_factura","valor_radicado","vigencia"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
     # NaN/NaT → None
-    df = df.where(pd.notna(df), None)
-    return df
+    return df.where(pd.notna(df), None)
 
 def _df_db_to_app(df_db: pd.DataFrame) -> pd.DataFrame:
     if df_db is None or df_db.empty:
         cols_min = list(APP2DB.keys())
         return pd.DataFrame(columns=cols_min)
     df = df_db.copy().rename(columns=DB2APP)
-
-    # Normaliza a tipos
+    # Normaliza tipos
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
     for c in ["Valor Factura","Valor Radicado"]:
@@ -216,35 +203,24 @@ def _df_db_to_app(df_db: pd.DataFrame) -> pd.DataFrame:
 
 def supabase_fetch_all() -> pd.DataFrame:
     sb = _get_supabase()
-    if not sb:
-        raise RuntimeError("Supabase no configurado")
+    if not sb: raise RuntimeError("Supabase no configurado")
     res = sb.table(DB_TABLE).select("*").execute()
     rows = res.data or []
     df_db = pd.DataFrame(rows)
     df_app = _df_db_to_app(df_db)
-    # asegurar todas las columnas
     for k in APP2DB.keys():
-        if k not in df_app.columns:
-            df_app[k] = pd.NA
+        if k not in df_app.columns: df_app[k] = pd.NA
     return df_app
 
 def supabase_upsert(df_app: pd.DataFrame, pk: str = DB_PK) -> tuple[bool, str]:
     sb = _get_supabase()
-    if not sb:
-        return False, "Supabase no configurado"
-
-    if df_app is None or df_app.empty:
-        return True, "OK_SUPABASE_NOOP"
-
+    if not sb: return False, "Supabase no configurado"
+    if df_app is None or df_app.empty: return True, "OK_SUPABASE_NOOP"
     df_db = _df_app_to_db(df_app)
-    if df_db.empty or len(df_db.columns) == 0:
-        return True, "OK_SUPABASE_NOOP"
-
-    if pk not in df_db.columns:
-        return False, f"Falta la columna PK '{pk}'"
+    if df_db.empty or len(df_db.columns) == 0: return True, "OK_SUPABASE_NOOP"
+    if pk not in df_db.columns: return False, f"Falta la columna PK '{pk}'"
     if df_db[pk].isna().any() or (df_db[pk].astype(str).str.strip()=="").any():
         return False, f"Hay registros sin '{pk}'"
-
     try:
         records = df_db.to_dict(orient="records")
         sb.table(DB_TABLE).upsert(records, on_conflict=pk).execute()
@@ -277,7 +253,6 @@ def load_data():
 def guardar_inventario(df: pd.DataFrame, factura_verificar: str | None = None) -> tuple[bool, str]:
     """Guarda en Supabase si está configurado; si no, en Excel. Luego verifica."""
     df_to_save = df.copy()
-
     # Tipos antes de guardar
     for c in ["Fecha factura","FechaRadicacion","FechaMovimiento"]:
         df_to_save[c] = pd.to_datetime(df_to_save[c], errors="coerce")
@@ -317,7 +292,8 @@ def login():
     with st.sidebar.form("login_form", clear_on_submit=False):
         cedula = st.text_input("Cédula", key="login_cedula")
         contrasena = st.text_input("Contraseña", type="password", key="login_pwd")
-        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+        # Compat aquí también
+        submitted = form_submit_button_compat("Ingresar", key="login_submit")
     if submitted:
         try:
             users = pd.read_excel(USUARIOS_FILE, dtype=str)
@@ -589,10 +565,24 @@ def main_app():
                         else:
                             st.error(f"❌ Error guardando: {msg}")
 
-    # ===== 📝 GESTIÓN =====
+    # ===== 📝 GESTIÓN (con compat y keys únicas) =====
     with tab_gestion:
         show_flash()
         st.subheader("📝 Gestión")
+
+        def safe_date(x, default=date.today()):
+            """Convierte valores varios a date para date_input sin romper si es NaT/None."""
+            try:
+                if isinstance(x, pd.Timestamp) and pd.notna(x): return x.date()
+                if isinstance(x, (datetime, )): return x.date()
+                if isinstance(x, date): return x
+                if isinstance(x, str) and x.strip():
+                    t = pd.to_datetime(x, errors="coerce")
+                    if pd.notna(t): return t.date()
+            except Exception:
+                pass
+            return default
+
         if df.empty:
             st.info("Ingresa o busca una factura para editar/crear.")
         else:
@@ -606,14 +596,20 @@ def main_app():
             if not numero_activo:
                 st.info("Ingresa un número de factura y presiona **Buscar / Cargar** para editar o crear.")
             else:
+                key_ns = f"gestion_{numero_activo}"
+
                 mask = df.get("NumeroFactura", pd.Series(dtype=str)).astype(str).str.strip() == str(numero_activo).strip()
                 existe = bool(mask.any())
                 idx = df[mask].index[0] if existe else None
                 fila = df.loc[idx] if existe else pd.Series(dtype=object)
 
                 def getv(s, k, default=None):
-                    v = s.get(k, default) if isinstance(s, pd.Series) else default
-                    return v if not (pd.isna(v) if hasattr(pd, "isna") else v is None) else default
+                    try:
+                        v = s.get(k, default) if isinstance(s, pd.Series) else default
+                        if pd.isna(v): return default
+                        return v
+                    except Exception:
+                        return default
 
                 def_val = {
                     "ID": getv(fila,"ID",""),
@@ -634,103 +630,122 @@ def main_app():
                     "Valor Radicado": getv(fila,"Valor Radicado", pd.NA),
                 }
 
-                # Top controls
+                # Top controls (con llaves únicas)
                 ctop1, ctop2, ctop3 = st.columns(3)
-                ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True, key="gestion_id_display")
+                ctop1.text_input("ID (automático)", value=def_val["ID"], disabled=True, key=f"{key_ns}_id_display")
                 est_val = ctop2.selectbox("Estado", options=ESTADOS,
                                           index=ESTADOS.index(def_val["Estado"]) if def_val["Estado"] in ESTADOS else 0,
-                                          key="estado_val")
+                                          key=f"{key_ns}_estado_val")
                 frad_disabled = (est_val != "Radicada")
-                frad_val = ctop3.date_input("Fecha de Radicación",
-                                            value=(def_val["FechaRadicacion"].date() if pd.notna(def_val["FechaRadicacion"]) else date.today()),
-                                            disabled=frad_disabled, key="frad_val")
+                frad_val = ctop3.date_input(
+                    "Fecha de Radicación",
+                    value=safe_date(def_val["FechaRadicacion"]),
+                    disabled=frad_disabled,
+                    key=f"{key_ns}_frad_val"
+                )
 
-                with st.form("form_factura", clear_on_submit=False):
+                with st.form(f"{key_ns}_form_factura", clear_on_submit=False):
                     f1, f2 = st.columns(2)
                     # Básicos
-                    num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"], key="gestion_num_factura")
-                    eps_val = f1.text_input("EPS", value=def_val["EPS"], key="gestion_eps")
+                    num_val = f1.text_input("Número de factura", value=def_val["NumeroFactura"], key=f"{key_ns}_num_factura")
+                    eps_val = f1.text_input("EPS", value=def_val["EPS"], key=f"{key_ns}_eps")
 
                     # Valores y extras izquierda
-                    valor_fact = f1.text_input("Valor Factura", value=(str(def_val["Valor Factura"]) if pd.notna(def_val["Valor Factura"]) else ""), key="gestion_valor_factura")
-                    valor_radic = f1.text_input("Valor Radicado", value=(str(def_val["Valor Radicado"]) if pd.notna(def_val["Valor Radicado"]) else ""), key="gestion_valor_radicado")
+                    valor_fact = f1.text_input("Valor Factura",
+                                               value=(str(def_val["Valor Factura"]) if pd.notna(def_val["Valor Factura"]) else ""),
+                                               key=f"{key_ns}_valor_factura")
+                    valor_radic = f1.text_input("Valor Radicado",
+                                                value=(str(def_val["Valor Radicado"]) if pd.notna(def_val["Valor Radicado"]) else ""),
+                                                key=f"{key_ns}_valor_radicado")
 
-                    fecha_fact = f1.date_input("Fecha factura",
-                                               value=(def_val["Fecha factura"].date() if isinstance(def_val["Fecha factura"], pd.Timestamp) and pd.notna(def_val["Fecha factura"]) else date.today()),
-                                               key="gestion_fecha_factura")
+                    fecha_fact = f1.date_input(
+                        "Fecha factura",
+                        value=safe_date(def_val["Fecha factura"]),
+                        key=f"{key_ns}_fecha_factura"
+                    )
 
                     # Derecha
-                    vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]), key="gestion_vigencia")
-                    obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100, key="gestion_obs")
-                    doc_val = f2.text_input("Documento", value=str(def_val["Documento"]), key="gestion_documento")
-                    pac_val = f2.text_input("Paciente", value=str(def_val["Paciente"]), key="gestion_paciente")
-                    no_radicado = f2.text_input("No Radicado", value=str(def_val["No Radicado"]), key="gestion_no_radicado")
+                    vig_val = f2.text_input("Vigencia", value=str(def_val["Vigencia"]), key=f"{key_ns}_vigencia")
+                    obs_val = f2.text_area("Observaciones", value=def_val["Observaciones"], height=100, key=f"{key_ns}_obs")
+                    doc_val = f2.text_input("Documento", value=str(def_val["Documento"]), key=f"{key_ns}_documento")
+                    pac_val = f2.text_input("Paciente", value=str(def_val["Paciente"]), key=f"{key_ns}_paciente")
+                    no_radicado = f2.text_input("No Radicado", value=str(def_val["No Radicado"]), key=f"{key_ns}_no_radicado")
 
-                    submit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True, key="btn_form_guardar")
+                    submit = form_submit_button_compat("💾 Guardar cambios", key=f"{key_ns}_submit")
 
                 if submit:
-                    ahora = pd.Timestamp(datetime.now())
-                    mask2 = df.get("NumeroFactura", pd.Series(dtype=str)).astype(str).str.strip() == str(num_val).strip()
-                    existe2 = bool(mask2.any()); idx2 = df[mask2].index[0] if existe2 else None
+                    try:
+                        if not str(num_val).strip():
+                            st.error("El **Número de factura** es obligatorio.")
+                        else:
+                            ahora = pd.Timestamp(datetime.now())
+                            mask2 = df.get("NumeroFactura", pd.Series(dtype=str)).astype(str).str.strip() == str(num_val).strip()
+                            existe2 = bool(mask2.any()); idx2 = df[mask2].index[0] if existe2 else None
 
-                    estado_anterior = (str(df.loc[idx2,"Estado"]) if existe2 and "Estado" in df.columns else "").strip()
-                    estado_actual = st.session_state.get("estado_val", estado_anterior or "Pendiente")
+                            estado_anterior = (str(df.loc[idx2,"Estado"]) if existe2 and "Estado" in df.columns else "").strip()
+                            estado_actual = st.session_state.get(f"{key_ns}_estado_val", estado_anterior or "Pendiente")
 
-                    frad_widget = st.session_state.get("frad_val", def_val["FechaRadicacion"] if pd.notna(def_val["FechaRadicacion"]) else date.today())
-                    frad_ts = pd.to_datetime(frad_widget) if estado_actual == "Radicada" else (pd.to_datetime(df.loc[idx2,"FechaRadicacion"]) if existe2 and "FechaRadicacion" in df.columns else pd.NaT)
+                            frad_widget = st.session_state.get(f"{key_ns}_frad_val", safe_date(def_val["FechaRadicacion"]))
+                            frad_ts = pd.to_datetime(frad_widget) if estado_actual == "Radicada" else (pd.to_datetime(df.loc[idx2,"FechaRadicacion"]) if existe2 and "FechaRadicacion" in df.columns else pd.NaT)
 
-                    mes_nuevo = (df.loc[idx2,"Mes"] if existe2 and "Mes" in df.columns else "")
-                    if pd.notna(frad_ts): mes_nuevo = MES_NOMBRE[int(frad_ts.month)]
+                            mes_nuevo = (df.loc[idx2,"Mes"] if existe2 and "Mes" in df.columns else "")
+                            if pd.notna(frad_ts): mes_nuevo = MES_NOMBRE[int(frad_ts.month)]
 
-                    estado_cambio = (estado_actual != estado_anterior) or (not existe2)
-                    fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
+                            estado_cambio = (estado_actual != estado_anterior) or (not existe2)
+                            fecha_mov = (ahora if estado_cambio else (pd.to_datetime(df.loc[idx2,"FechaMovimiento"]) if existe2 and "FechaMovimiento" in df.columns else pd.NaT))
 
-                    # ID
-                    if existe2 and "ID" in df.columns and pd.notna(df.loc[idx2,"ID"]) and str(df.loc[idx2,"ID"]).strip():
-                        new_id = str(df.loc[idx2,"ID"]).strip()
-                    else:
-                        try:
-                            nums = pd.to_numeric(df.get("ID", pd.Series(dtype=str)).astype(str).str.extract(r"(\d+)$")[0], errors="coerce")
-                            nextn = int(nums.max()) + 1 if nums.notna().any() else 1
-                        except Exception:
-                            nextn = 1
-                        new_id = f"CHIA-{nextn:04d}"
+                            # ID
+                            if existe2 and "ID" in df.columns and pd.notna(df.loc[idx2,"ID"]) and str(df.loc[idx2,"ID"]).strip():
+                                new_id = str(df.loc[idx2,"ID"]).strip()
+                            else:
+                                try:
+                                    nums = pd.to_numeric(df.get("ID", pd.Series(dtype=str)).astype(str).str.extract(r"(\d+)$")[0], errors="coerce")
+                                    nextn = int(nums.max()) + 1 if nums.notna().any() else 1
+                                except Exception:
+                                    nextn = 1
+                                new_id = f"CHIA-{nextn:04d}"
 
-                    # Normalizar valores monetarios
-                    v_fact = _parse_currency(valor_fact)
-                    v_radic = _parse_currency(valor_radic)
+                            # Normalizar valores monetarios
+                            def _norm_val(x):
+                                v = _parse_currency(x)
+                                return float(v) if v is not pd.NA and v is not None else None
+                            v_fact = _norm_val(valor_fact)
+                            v_radic = _norm_val(valor_radic)
 
-                    registro = {
-                        "ID": new_id,
-                        "NumeroFactura": str(num_val).strip(),
-                        "EPS": str(eps_val).strip(),
-                        "Vigencia": int(vig_val) if str(vig_val).isdigit() else vig_val,
-                        "Estado": estado_actual,
-                        "FechaRadicacion": frad_ts,
-                        "FechaMovimiento": fecha_mov,
-                        "Observaciones": str(obs_val).strip(),
-                        "Mes": mes_nuevo,
-                        "Fecha factura": pd.to_datetime(fecha_fact) if fecha_fact else pd.NaT,
-                        "Documento": str(doc_val).strip() if doc_val is not None else "",
-                        "Paciente": str(pac_val).strip() if pac_val is not None else "",
-                        "No Radicado": str(no_radicado).strip() if no_radicado is not None else "",
-                        "Valor Factura": v_fact,
-                        "Valor Radicado": v_radic,
-                    }
+                            registro = {
+                                "ID": new_id,
+                                "NumeroFactura": str(num_val).strip(),
+                                "EPS": str(eps_val).strip(),
+                                "Vigencia": int(vig_val) if str(vig_val).isdigit() else (None if not str(vig_val).strip() else vig_val),
+                                "Estado": estado_actual,
+                                "FechaRadicacion": frad_ts,
+                                "FechaMovimiento": fecha_mov,
+                                "Observaciones": str(obs_val).strip(),
+                                "Mes": mes_nuevo,
+                                "Fecha factura": pd.to_datetime(safe_date(fecha_fact)) if fecha_fact else pd.NaT,
+                                "Documento": str(doc_val).strip() if doc_val is not None else "",
+                                "Paciente": str(pac_val).strip() if pac_val is not None else "",
+                                "No Radicado": str(no_radicado).strip() if no_radicado is not None else "",
+                                "Valor Factura": v_fact,
+                                "Valor Radicado": v_radic,
+                            }
 
-                    if existe2:
-                        for k,v in registro.items(): df.at[idx2, k] = v
-                    else:
-                        df = pd.concat([df, pd.DataFrame([registro])], ignore_index=True)
+                            if existe2:
+                                for k,v in registro.items(): df.at[idx2, k] = v
+                            else:
+                                df = pd.concat([df, pd.DataFrame([registro])], ignore_index=True)
 
-                    ok, msg = guardar_inventario(df, factura_verificar=registro["NumeroFactura"])
-                    if ok:
-                        tag = "(Supabase)" if msg=="OK_SUPABASE" else "(Excel local)"
-                        flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} {tag}")
-                        st.session_state["factura_activa"] = ""
-                        st.rerun()
-                    else:
-                        st.error(f"❌ No pude confirmar el guardado: {msg}")
+                            ok, msg = guardar_inventario(df, factura_verificar=registro["NumeroFactura"])
+                            if ok:
+                                tag = "(Supabase)" if msg=="OK_SUPABASE" else "(Excel local)"
+                                flash_success(f"✅ Cambios guardados — Factura {registro['NumeroFactura']} {tag}")
+                                st.session_state["factura_activa"] = ""
+                                st.rerun()
+                            else:
+                                st.error(f"❌ No pude confirmar el guardado: {msg}")
+                    except Exception as e:
+                        st.error("❌ Ocurrió un error al guardar en Gestión.")
+                        st.exception(e)
 
     # ===== 📑 REPORTES =====
     with tab_reportes:
@@ -915,6 +930,7 @@ else:
     # Si no quieres login, descomenta la línea siguiente para omitirlo:
     # st.session_state["autenticado"] = True; main_app()
     login()
+
 
 
 
